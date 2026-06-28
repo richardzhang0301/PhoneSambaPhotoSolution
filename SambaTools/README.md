@@ -12,4 +12,4 @@ run.bat "\\server\share\Photos"
 
 The tool creates a hidden `.phonesamba_thumbs` folder inside the photo folder. The Android app looks there first, so the Samba tab can show tiny JPEG previews instead of reading full-size photos over Wi-Fi.
 
-If Pillow is missing, `run.bat` can install it for the Python environment you are using.
+`run.bat` creates a local `.venv` when needed, uses it on later runs, and can install Pillow into that environment if it is missing.

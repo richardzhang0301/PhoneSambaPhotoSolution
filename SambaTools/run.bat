@@ -3,6 +3,27 @@ setlocal
 cd /d "%~dp0"
 
 set "PHOTO_DIR=%~1"
+if exist ".venv\Scripts\python.exe" (
+    set "PY_CMD=.venv\Scripts\python.exe"
+) else (
+    echo Creating Python virtual environment in .venv...
+    where py >nul 2>nul
+    if not errorlevel 1 (
+        py -3 -m venv .venv
+    )
+
+    if not exist ".venv\Scripts\python.exe" (
+        python -m venv .venv
+    )
+
+    if not exist ".venv\Scripts\python.exe" (
+        echo Failed to create Python virtual environment.
+        exit /b 1
+    )
+
+    set "PY_CMD=.venv\Scripts\python.exe"
+)
+
 if "%PHOTO_DIR%"=="" (
     echo Enter the mounted or UNC Samba photo folder.
     echo Example: \\server\share\Photos
@@ -12,17 +33,6 @@ if "%PHOTO_DIR%"=="" (
 if "%PHOTO_DIR%"=="" (
     echo No folder provided.
     exit /b 1
-)
-
-if exist ".venv\Scripts\python.exe" (
-    set "PY_CMD=.venv\Scripts\python.exe"
-) else (
-    where py >nul 2>nul
-    if not errorlevel 1 (
-        set "PY_CMD=py -3"
-    ) else (
-        set "PY_CMD=python"
-    )
 )
 
 %PY_CMD% -c "import PIL" >nul 2>nul
