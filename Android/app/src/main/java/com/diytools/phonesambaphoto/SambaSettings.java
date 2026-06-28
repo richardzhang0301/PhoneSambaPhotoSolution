@@ -77,30 +77,53 @@ final class SambaSettings {
     }
 
     String directoryUrl() {
-        StringBuilder builder = new StringBuilder("smb://");
-        builder.append(host).append("/").append(encodeSegment(share)).append("/");
+        StringBuilder builder = rootUrlBuilder();
         appendFolder(builder);
+        if (builder.charAt(builder.length() - 1) != '/') {
+            builder.append("/");
+        }
         return builder.toString();
     }
 
     String fileUrl(String fileName) {
-        StringBuilder builder = new StringBuilder("smb://");
-        builder.append(host).append("/").append(encodeSegment(share)).append("/");
+        return childUrl(fileName);
+    }
+
+    String childUrl(String relativePath) {
+        StringBuilder builder = rootUrlBuilder();
         appendFolder(builder);
-        builder.append(encodeSegment(fileName));
+        appendRelativePath(builder, relativePath);
         return builder.toString();
     }
 
+    private StringBuilder rootUrlBuilder() {
+        StringBuilder builder = new StringBuilder("smb://");
+        builder.append(host).append("/").append(encodeSegment(share)).append("/");
+        return builder;
+    }
+
     private void appendFolder(StringBuilder builder) {
-        if (TextUtils.isEmpty(folder)) {
+        appendRelativePath(builder, folder);
+    }
+
+    private void appendRelativePath(StringBuilder builder, String relativePath) {
+        String cleanPath = cleanFolder(relativePath);
+        if (TextUtils.isEmpty(cleanPath)) {
             return;
         }
-        String[] parts = folder.split("/");
-        for (String part : parts) {
-            String cleanPart = cleanText(part);
-            if (!TextUtils.isEmpty(cleanPart)) {
-                builder.append(encodeSegment(cleanPart)).append("/");
+        String[] parts = cleanPath.split("/");
+        for (int index = 0; index < parts.length; index++) {
+            String cleanPart = cleanText(parts[index]);
+            if (TextUtils.isEmpty(cleanPart)) {
+                continue;
             }
+            if (builder.length() > 0 && builder.charAt(builder.length() - 1) != '/') {
+                builder.append("/");
+            }
+            builder.append(encodeSegment(cleanPart));
+        }
+        if (relativePath != null && relativePath.endsWith("/") && builder.charAt(builder.length() - 1) != '/') {
+            builder.append("/");
         }
     }
 
@@ -139,3 +162,6 @@ final class SambaSettings {
         }
     }
 }
+
+
+

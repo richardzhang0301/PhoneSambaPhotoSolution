@@ -69,7 +69,32 @@ final class RemoteThumbLoader {
     private Bitmap loadBitmap(RemotePhotoItem item, SambaSettings settings, int sizePx) {
         try {
             CIFSContext context = SambaUploader.createContext(settings);
-            SmbFile file = new SmbFile(item.url, context);
+            Bitmap thumbnail = decodeSmallFile(item.thumbnailUrl, context);
+            if (thumbnail != null) {
+                return thumbnail;
+            }
+            return decodeOriginal(item.url, context, sizePx);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private Bitmap decodeSmallFile(String url, CIFSContext context) {
+        try {
+            SmbFile file = new SmbFile(url, context);
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inPreferredConfig = Bitmap.Config.RGB_565;
+            try (InputStream input = new BufferedInputStream(new SmbFileInputStream(file))) {
+                return BitmapFactory.decodeStream(input, null, options);
+            }
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private Bitmap decodeOriginal(String url, CIFSContext context, int sizePx) {
+        try {
+            SmbFile file = new SmbFile(url, context);
 
             BitmapFactory.Options bounds = new BitmapFactory.Options();
             bounds.inJustDecodeBounds = true;

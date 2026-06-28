@@ -1,6 +1,14 @@
 .gradle/
+.idea/
+local.properties
 build/
 app/build/
-local.properties
+Android/.gradle/
+Android/.idea/
+Android/local.properties
+Android/build/
+Android/app/build/
+SambaTools/.venv/
+SambaTools/__pycache__/
+SambaTools/.mypy_cache/
 *.iml
-.idea/
