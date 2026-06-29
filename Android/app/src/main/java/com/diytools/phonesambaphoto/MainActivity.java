@@ -3,9 +3,12 @@ package com.diytools.phonesambaphoto;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.DatePickerDialog;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.drawable.Drawable;
 import android.os.Build;
 import android.os.Bundle;
@@ -13,20 +16,26 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
 import android.text.TextUtils;
+import android.view.DisplayCutout;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.GridView;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.TextView;
 
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -36,6 +45,9 @@ import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_IMAGES = 1001;
+    private static final String PREFS = "main_ui_state";
+    private static final String PREF_SHOW_PHONE = "show_phone_media";
+    private static final String PREF_SHOW_GOOGLE_DRIVE = "show_google_drive_media";
 
     private enum Tab {
         LOCAL,
@@ -46,6 +58,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService scanExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService remoteExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService uploadExecutor = Executors.newSingleThreadExecutor();
+    private final List<PhotoItem> allPhotos = new ArrayList<>();
     private final List<PhotoItem> photos = new ArrayList<>();
     private final List<RemotePhotoItem> remotePhotos = new ArrayList<>();
 
@@ -56,6 +69,7 @@ public final class MainActivity extends Activity {
     private GridView localGrid;
     private GridView remoteGrid;
     private LinearLayout buttonRow;
+    private LinearLayout localFilterRow;
     private TextView status;
     private TextView destination;
     private ProgressBar progress;
@@ -64,12 +78,15 @@ public final class MainActivity extends Activity {
     private Button syncAllButton;
     private Button uploadSelectedButton;
     private Button cancelSelectionButton;
-    private Button sambaSetupButton;
+    private CheckBox phoneFilterCheckBox;
+    private CheckBox googleDriveFilterCheckBox;
     private Tab selectedTab = Tab.LOCAL;
     private boolean uploading;
     private boolean localLoaded;
     private boolean remoteLoaded;
     private boolean selectionMode;
+    private boolean showPhoneMedia = true;
+    private boolean showGoogleDriveMedia = false;
     private String localLoadedIdentity = "";
     private String remoteLoadedIdentity = "";
 
@@ -78,6 +95,7 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         thumbLoader = new ThumbLoader(this);
         remoteThumbLoader = new RemoteThumbLoader(this);
+        loadLocalFilterSettings();
         setContentView(createContentView());
 
         adapter = new PhotoGridAdapter(this, photos, thumbLoader);
@@ -135,6 +153,7 @@ public final class MainActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(getColorCompat(R.color.surface));
+        applyMainSafeArea(root);
 
         LinearLayout toolbar = new LinearLayout(this);
         toolbar.setGravity(Gravity.CENTER_VERTICAL);
@@ -187,22 +206,29 @@ public final class MainActivity extends Activity {
         destination.setSingleLine(true);
         destination.setEllipsize(TextUtils.TruncateAt.MIDDLE);
         destinationRow.addView(destination, new LinearLayout.LayoutParams(0, dp(32), 1));
-
-        sambaSetupButton = smallButton("Setup");
-        sambaSetupButton.setOnClickListener(v -> showSettingsDialog());
-        LinearLayout.LayoutParams setupParams = new LinearLayout.LayoutParams(dp(76), dp(32));
-        setupParams.setMargins(dp(8), 0, 0, 0);
-        destinationRow.addView(sambaSetupButton, setupParams);
         actions.addView(destinationRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32)));
 
-        buttonRow = new LinearLayout(this);
-        buttonRow.setGravity(Gravity.CENTER_VERTICAL);
+        localFilterRow = new LinearLayout(this);
+        localFilterRow.setGravity(Gravity.CENTER_VERTICAL);
 
-        syncAllButton = primaryButton("Sync all", R.drawable.ic_sync);
+        syncAllButton = primaryButton("Sync", R.drawable.ic_sync);
         syncAllButton.setOnClickListener(v -> syncAll());
         LinearLayout.LayoutParams syncParams = new LinearLayout.LayoutParams(0, dp(44), 1);
         syncParams.setMargins(0, 0, dp(8), 0);
-        buttonRow.addView(syncAllButton, syncParams);
+        localFilterRow.addView(syncAllButton, syncParams);
+
+        phoneFilterCheckBox = filterCheckBox("Phone", showPhoneMedia);
+        googleDriveFilterCheckBox = filterCheckBox("Google Drive", showGoogleDriveMedia);
+        phoneFilterCheckBox.setOnCheckedChangeListener((buttonView, isChecked) -> onLocalFilterChanged());
+        googleDriveFilterCheckBox.setOnCheckedChangeListener((buttonView, isChecked) -> onLocalFilterChanged());
+        LinearLayout.LayoutParams phoneFilterParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+        phoneFilterParams.setMargins(0, 0, dp(8), 0);
+        localFilterRow.addView(phoneFilterCheckBox, phoneFilterParams);
+        localFilterRow.addView(googleDriveFilterCheckBox, new LinearLayout.LayoutParams(0, dp(44), 1));
+        actions.addView(localFilterRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+
+        buttonRow = new LinearLayout(this);
+        buttonRow.setGravity(Gravity.CENTER_VERTICAL);
 
         uploadSelectedButton = secondaryButton("Upload selected", R.drawable.ic_upload);
         uploadSelectedButton.setOnClickListener(v -> uploadSelected());
@@ -240,6 +266,47 @@ public final class MainActivity extends Activity {
         updateButtons();
         setStatus("Ready");
         return root;
+    }
+
+    private void applyMainSafeArea(View root) {
+        final int baseLeft = root.getPaddingLeft();
+        final int baseTop = root.getPaddingTop();
+        final int baseRight = root.getPaddingRight();
+        final int baseBottom = root.getPaddingBottom();
+
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            int safeLeft;
+            int safeTop;
+            int safeRight;
+            int safeBottom;
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Insets safeInsets = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                safeLeft = safeInsets.left;
+                safeTop = safeInsets.top;
+                safeRight = safeInsets.right;
+                safeBottom = safeInsets.bottom;
+            } else {
+                safeLeft = insets.getSystemWindowInsetLeft();
+                safeTop = insets.getSystemWindowInsetTop();
+                safeRight = insets.getSystemWindowInsetRight();
+                safeBottom = insets.getSystemWindowInsetBottom();
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    DisplayCutout cutout = insets.getDisplayCutout();
+                    if (cutout != null) {
+                        safeLeft = Math.max(safeLeft, cutout.getSafeInsetLeft());
+                        safeTop = Math.max(safeTop, cutout.getSafeInsetTop());
+                        safeRight = Math.max(safeRight, cutout.getSafeInsetRight());
+                        safeBottom = Math.max(safeBottom, cutout.getSafeInsetBottom());
+                    }
+                }
+            }
+
+            view.setPadding(baseLeft + safeLeft, baseTop + safeTop, baseRight + safeRight, baseBottom + safeBottom);
+            return insets;
+        });
+        root.post(root::requestApplyInsets);
     }
 
     private GridView photoGrid() {
@@ -325,20 +392,68 @@ public final class MainActivity extends Activity {
             List<PhotoItem> loaded = PhotoRepository.loadPhotos(getApplicationContext(), settings);
             main.post(() -> {
                 selectionMode = false;
-                photos.clear();
-                photos.addAll(loaded);
+                allPhotos.clear();
+                allPhotos.addAll(loaded);
                 localLoaded = true;
                 localLoadedIdentity = settings.identityKey();
                 applyCachedSambaExists(settings);
-                adapter.notifyDataSetChanged();
+                applyLocalFilters();
                 refreshLocalSambaExists(settings);
                 if (selectedTab == Tab.LOCAL) {
-                    setStatus(localMediaStatus(loaded.size()));
+                    setStatus(localMediaStatus(photos.size()));
                 }
                 updateDestinationLabel();
                 updateButtons();
             });
         });
+    }
+
+    private void applyLocalFilters() {
+        photos.clear();
+        for (PhotoItem item : allPhotos) {
+            if (shouldShowLocalItem(item)) {
+                photos.add(item);
+            }
+        }
+        if (adapter != null) {
+            adapter.notifyDataSetChanged();
+        }
+    }
+
+    private boolean shouldShowLocalItem(PhotoItem item) {
+        return item.googleDrive ? showGoogleDriveMedia : showPhoneMedia;
+    }
+
+    private void onLocalFilterChanged() {
+        boolean nextShowPhoneMedia = phoneFilterCheckBox == null || phoneFilterCheckBox.isChecked();
+        boolean nextShowGoogleDriveMedia = googleDriveFilterCheckBox == null || googleDriveFilterCheckBox.isChecked();
+        if (nextShowPhoneMedia == showPhoneMedia && nextShowGoogleDriveMedia == showGoogleDriveMedia) {
+            return;
+        }
+        showPhoneMedia = nextShowPhoneMedia;
+        showGoogleDriveMedia = nextShowGoogleDriveMedia;
+        saveLocalFilterSettings();
+        selectionMode = false;
+        clearLocalSelection();
+        applyLocalFilters();
+        updateButtons();
+        if (selectedTab == Tab.LOCAL) {
+            setStatus(localMediaStatus(photos.size()));
+        }
+    }
+
+    private void loadLocalFilterSettings() {
+        SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        showPhoneMedia = prefs.getBoolean(PREF_SHOW_PHONE, true);
+        showGoogleDriveMedia = prefs.getBoolean(PREF_SHOW_GOOGLE_DRIVE, false);
+    }
+
+    private void saveLocalFilterSettings() {
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(PREF_SHOW_PHONE, showPhoneMedia)
+                .putBoolean(PREF_SHOW_GOOGLE_DRIVE, showGoogleDriveMedia)
+                .apply();
     }
 
     private void loadRemotePhotos() {
@@ -463,13 +578,13 @@ public final class MainActivity extends Activity {
         for (RemotePhotoItem remote : remoteItems) {
             remoteKeys.add(sambaMatchKey(remote.name, remote.size, remote.video));
         }
-        for (PhotoItem photo : photos) {
+        for (PhotoItem photo : allPhotos) {
             photo.sambaExists = photo.uploaded || remoteKeys.contains(sambaMatchKey(photo.name, photo.size, photo.video));
         }
     }
 
     private void clearSambaExists() {
-        for (PhotoItem photo : photos) {
+        for (PhotoItem photo : allPhotos) {
             photo.sambaExists = photo.uploaded;
         }
     }
@@ -485,17 +600,206 @@ public final class MainActivity extends Activity {
             showSettingsDialog();
             return;
         }
+        showSyncDateRangeDialog(settings);
+    }
+
+    private void showSyncDateRangeDialog(SambaSettings settings) {
+        final int todayId = View.generateViewId();
+        final int weekId = View.generateViewId();
+        final int monthId = View.generateViewId();
+        final int yearId = View.generateViewId();
+        final int customId = View.generateViewId();
+        final Calendar[] startDate = {startOfToday()};
+        final Calendar[] endDate = {endOfToday()};
+        applySyncPreset(weekId, todayId, weekId, monthId, yearId, startDate, endDate);
+
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(18);
+        form.setPadding(pad, dp(8), pad, 0);
+
+        RadioGroup presets = new RadioGroup(this);
+        presets.setOrientation(RadioGroup.VERTICAL);
+        presets.addView(rangeRadioButton(todayId, "Today"));
+        presets.addView(rangeRadioButton(weekId, "Past Week"));
+        presets.addView(rangeRadioButton(monthId, "Past Month"));
+        presets.addView(rangeRadioButton(yearId, "Past Year"));
+        presets.addView(rangeRadioButton(customId, "Custom Range"));
+        form.addView(presets, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout dateRow = new LinearLayout(this);
+        dateRow.setGravity(Gravity.CENTER_VERTICAL);
+        Button startButton = dateButton("");
+        Button endButton = dateButton("");
+        LinearLayout.LayoutParams startParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+        startParams.setMargins(0, dp(10), dp(8), 0);
+        dateRow.addView(startButton, startParams);
+        LinearLayout.LayoutParams endParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+        endParams.setMargins(0, dp(10), 0, 0);
+        dateRow.addView(endButton, endParams);
+        form.addView(dateRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)));
+
+        TextView rangeMessage = new TextView(this);
+        rangeMessage.setTextColor(Color.rgb(176, 43, 43));
+        rangeMessage.setTextSize(13);
+        rangeMessage.setSingleLine(false);
+        form.addView(rangeMessage, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(28)));
+
+        Runnable refreshDates = () -> {
+            startButton.setText("Start  " + formatDate(startDate[0]));
+            endButton.setText("End  " + formatDate(endDate[0]));
+            boolean custom = presets.getCheckedRadioButtonId() == customId;
+            startButton.setEnabled(custom);
+            endButton.setEnabled(custom);
+            rangeMessage.setText("");
+        };
+        startButton.setOnClickListener(v -> showDatePicker(startDate[0], false, refreshDates));
+        endButton.setOnClickListener(v -> showDatePicker(endDate[0], true, refreshDates));
+        presets.check(weekId);
+        refreshDates.run();
+        presets.setOnCheckedChangeListener((group, checkedId) -> {
+            if (checkedId != customId) {
+                applySyncPreset(checkedId, todayId, weekId, monthId, yearId, startDate, endDate);
+            }
+            refreshDates.run();
+        });
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Sync date range")
+                .setView(form)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("OK", null)
+                .create();
+        dialog.setOnShowListener(d -> {
+            Button ok = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            ok.setOnClickListener(v -> {
+                long startMillis = startDate[0].getTimeInMillis();
+                long endMillis = endDate[0].getTimeInMillis();
+                if (startMillis > endMillis) {
+                    rangeMessage.setText("Start date must be before end date");
+                    return;
+                }
+                dialog.dismiss();
+                syncDateRange(settings, startMillis, endMillis);
+            });
+        });
+        dialog.show();
+    }
+
+    private void applySyncPreset(int checkedId, int todayId, int weekId, int monthId, int yearId, Calendar[] startDate, Calendar[] endDate) {
+        Calendar start = startOfToday();
+        Calendar end = endOfToday();
+        if (checkedId == weekId) {
+            start.add(Calendar.DAY_OF_YEAR, -6);
+        } else if (checkedId == monthId) {
+            start.add(Calendar.MONTH, -1);
+        } else if (checkedId == yearId) {
+            start.add(Calendar.YEAR, -1);
+        } else if (checkedId != todayId) {
+            return;
+        }
+        startDate[0] = start;
+        endDate[0] = end;
+    }
+
+    private void syncDateRange(SambaSettings settings, long startMillis, long endMillis) {
         List<PhotoItem> pending = new ArrayList<>();
         for (PhotoItem photo : photos) {
-            if (!photo.uploaded && !photo.sambaExists) {
+            if (!photo.uploaded && !photo.sambaExists && isInDateRange(photo, startMillis, endMillis)) {
                 pending.add(photo);
             }
         }
         if (pending.isEmpty()) {
-            setStatus("All media is synced");
+            setStatus("No media to sync in date range");
             return;
         }
         startUpload(settings, pending);
+    }
+
+    private boolean isInDateRange(PhotoItem photo, long startMillis, long endMillis) {
+        long mediaTime = photo.sortTimeMillis();
+        return mediaTime >= startMillis && mediaTime <= endMillis;
+    }
+
+    private Calendar startOfToday() {
+        Calendar calendar = Calendar.getInstance();
+        setStartOfDay(calendar);
+        return calendar;
+    }
+
+    private Calendar endOfToday() {
+        Calendar calendar = Calendar.getInstance();
+        setEndOfDay(calendar);
+        return calendar;
+    }
+
+    private void setStartOfDay(Calendar calendar) {
+        calendar.set(Calendar.HOUR_OF_DAY, 0);
+        calendar.set(Calendar.MINUTE, 0);
+        calendar.set(Calendar.SECOND, 0);
+        calendar.set(Calendar.MILLISECOND, 0);
+    }
+
+    private void setEndOfDay(Calendar calendar) {
+        calendar.set(Calendar.HOUR_OF_DAY, 23);
+        calendar.set(Calendar.MINUTE, 59);
+        calendar.set(Calendar.SECOND, 59);
+        calendar.set(Calendar.MILLISECOND, 999);
+    }
+
+    private void showDatePicker(Calendar target, boolean endOfDay, Runnable onChanged) {
+        DatePickerDialog dialog = new DatePickerDialog(
+                this,
+                (view, year, month, dayOfMonth) -> {
+                    target.set(Calendar.YEAR, year);
+                    target.set(Calendar.MONTH, month);
+                    target.set(Calendar.DAY_OF_MONTH, dayOfMonth);
+                    if (endOfDay) {
+                        setEndOfDay(target);
+                    } else {
+                        setStartOfDay(target);
+                    }
+                    onChanged.run();
+                },
+                target.get(Calendar.YEAR),
+                target.get(Calendar.MONTH),
+                target.get(Calendar.DAY_OF_MONTH)
+        );
+        dialog.show();
+    }
+
+    private RadioButton rangeRadioButton(int id, String text) {
+        RadioButton radioButton = new RadioButton(this);
+        radioButton.setId(id);
+        radioButton.setText(text);
+        radioButton.setTextSize(14);
+        radioButton.setTextColor(getColorCompat(R.color.ink));
+        radioButton.setMinHeight(dp(36));
+        return radioButton;
+    }
+
+    private Button dateButton(String text) {
+        Button button = new Button(this);
+        button.setAllCaps(false);
+        button.setText(text);
+        button.setTextSize(13);
+        button.setTextColor(getColorCompat(R.color.ink));
+        button.setGravity(Gravity.CENTER);
+        button.setMinHeight(0);
+        button.setMinWidth(0);
+        button.setPadding(dp(8), 0, dp(8), 0);
+        button.setBackgroundResource(R.drawable.edit_text_bg);
+        return button;
+    }
+
+    private String formatDate(Calendar calendar) {
+        return String.format(
+                Locale.US,
+                "%04d-%02d-%02d",
+                calendar.get(Calendar.YEAR),
+                calendar.get(Calendar.MONTH) + 1,
+                calendar.get(Calendar.DAY_OF_MONTH)
+        );
     }
 
     private void uploadSelected() {
@@ -689,7 +993,7 @@ public final class MainActivity extends Activity {
     }
 
     private void clearLocalSelection() {
-        for (PhotoItem item : photos) {
+        for (PhotoItem item : allPhotos) {
             item.selected = false;
         }
     }
@@ -710,29 +1014,41 @@ public final class MainActivity extends Activity {
     }
 
     private String localMediaStatus(int count) {
-        return count == 0 ? "No media found" : count + " media files";
+        if (allPhotos.isEmpty()) {
+            return "No media found";
+        }
+        if (!showPhoneMedia && !showGoogleDriveMedia) {
+            return "All local sources hidden";
+        }
+        return count == 0 ? "No media shown" : count + " media files";
     }
+
     private void updateButtons() {
         if (localTabButton != null && remoteTabButton != null) {
             updateTabButton(localTabButton, selectedTab == Tab.LOCAL);
             updateTabButton(remoteTabButton, selectedTab == Tab.REMOTE);
         }
-        if (buttonRow != null) {
-            buttonRow.setVisibility(selectedTab == Tab.LOCAL ? View.VISIBLE : View.GONE);
+
+        boolean localVisible = selectedTab == Tab.LOCAL;
+        boolean selecting = selectionMode && localVisible;
+        if (localFilterRow != null) {
+            localFilterRow.setVisibility(localVisible && !selecting ? View.VISIBLE : View.GONE);
         }
-        if (sambaSetupButton != null) {
-            sambaSetupButton.setEnabled(!uploading);
+        if (buttonRow != null) {
+            buttonRow.setVisibility(selecting ? View.VISIBLE : View.GONE);
         }
         if (syncAllButton == null || uploadSelectedButton == null || cancelSelectionButton == null) {
             return;
         }
 
         int selected = selectedLocalCount();
-        boolean localVisible = selectedTab == Tab.LOCAL;
-        syncAllButton.setVisibility(selectionMode ? View.GONE : View.VISIBLE);
-        uploadSelectedButton.setVisibility(selectionMode ? View.VISIBLE : View.GONE);
-        cancelSelectionButton.setVisibility(selectionMode ? View.VISIBLE : View.GONE);
         syncAllButton.setEnabled(localVisible && !uploading && !photos.isEmpty());
+        if (phoneFilterCheckBox != null) {
+            phoneFilterCheckBox.setEnabled(localVisible && !selecting && !uploading);
+        }
+        if (googleDriveFilterCheckBox != null) {
+            googleDriveFilterCheckBox.setEnabled(localVisible && !selecting && !uploading);
+        }
         uploadSelectedButton.setEnabled(localVisible && selectionMode && !uploading && selected > 0);
         uploadSelectedButton.setText(selected > 0 ? "Upload " + selected : "Upload selected");
         cancelSelectionButton.setEnabled(localVisible && selectionMode && !uploading);
@@ -815,18 +1131,18 @@ public final class MainActivity extends Activity {
         return button;
     }
 
-    private Button smallButton(String text) {
-        Button button = new Button(this);
-        button.setAllCaps(false);
-        button.setText(text);
-        button.setTextSize(12);
-        button.setTextColor(getColorCompat(R.color.ink));
-        button.setGravity(Gravity.CENTER);
-        button.setMinHeight(0);
-        button.setMinWidth(0);
-        button.setPadding(dp(8), 0, dp(8), 0);
-        button.setBackgroundResource(R.drawable.button_secondary);
-        return button;
+    private CheckBox filterCheckBox(String text, boolean checked) {
+        CheckBox checkBox = new CheckBox(this);
+        checkBox.setAllCaps(false);
+        checkBox.setText(text);
+        checkBox.setTextSize(13);
+        checkBox.setTextColor(getColorCompat(R.color.ink));
+        checkBox.setGravity(Gravity.CENTER_VERTICAL);
+        checkBox.setMinHeight(0);
+        checkBox.setMinWidth(0);
+        checkBox.setPadding(0, 0, dp(8), 0);
+        checkBox.setChecked(checked);
+        return checkBox;
     }
 
     private ImageButton iconButton(int icon, String description) {

@@ -36,15 +36,10 @@ import android.widget.TextView;
 import android.widget.VideoView;
 
 import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -82,7 +77,6 @@ public final class RemoteMediaViewerActivity extends Activity {
     private MediaController remoteMediaController;
     private RemoteSmbMediaDataSource remoteMediaDataSource;
     private View videoControllerAnchor;
-    private File videoFile;
     private String name;
     private String url;
     private String thumbnailUrl;
@@ -231,9 +225,6 @@ public final class RemoteMediaViewerActivity extends Activity {
         executor.shutdownNow();
         releaseRemoteVideoPlayer();
         removeVideoViews();
-        if (videoFile != null && videoFile.exists()) {
-            videoFile.delete();
-        }
     }
 
     @Override
@@ -399,14 +390,7 @@ public final class RemoteMediaViewerActivity extends Activity {
             return;
         }
 
-        executor.execute(() -> {
-            try {
-                File file = copyLocalVideoToCache();
-                main.post(() -> playVideo(file));
-            } catch (Exception exc) {
-                main.post(() -> showError("Could not open video"));
-            }
-        });
+        playLocalVideo(Uri.parse(uriString));
     }
 
     private void prepareRemoteVideoStream() {
@@ -534,70 +518,13 @@ public final class RemoteMediaViewerActivity extends Activity {
         }
     }
 
-    private File copyLocalVideoToCache() throws Exception {
-        long total = size;
-        File target = videoCacheFile();
-        File temp = new File(target.getParentFile(), target.getName() + ".tmp");
-        if (target.exists() && total > 0L && target.length() == total) {
-            return target;
-        }
-        if (temp.exists()) {
-            temp.delete();
-        }
-
-        InputStream rawInput = getContentResolver().openInputStream(Uri.parse(uriString));
-        if (rawInput == null) {
-            throw new IOException("Video cannot be opened");
-        }
-
-        byte[] buffer = new byte[128 * 1024];
-        long copied = 0L;
-        long lastUpdate = 0L;
-        try (InputStream input = new BufferedInputStream(rawInput);
-             BufferedOutputStream output = new BufferedOutputStream(new FileOutputStream(temp))) {
-            int read;
-            while ((read = input.read(buffer)) != -1) {
-                if (Thread.currentThread().isInterrupted()) {
-                    throw new IOException("Video load cancelled");
-                }
-                output.write(buffer, 0, read);
-                copied += read;
-                long now = System.currentTimeMillis();
-                if (now - lastUpdate > 400L || copied == total) {
-                    lastUpdate = now;
-                    updateVideoProgress(copied, total);
-                }
-            }
-            output.flush();
-        }
-
-        if (target.exists()) {
-            target.delete();
-        }
-        if (!temp.renameTo(target)) {
-            throw new IOException("Cannot prepare video cache");
-        }
-        return target;
-    }
-
-    private File videoCacheFile() throws Exception {
-        File dir = new File(getCacheDir(), "media_viewer_videos");
-        if (!dir.exists() && !dir.mkdirs()) {
-            throw new IOException("Cannot create video cache");
-        }
-        return new File(dir, videoCacheName());
-    }
-
-
-    private void playVideo(File file) {
+    private void playLocalVideo(Uri uri) {
         if (isFinishing()) {
             return;
         }
         releaseRemoteVideoPlayer();
         removeVideoViews();
         photoView = null;
-        videoFile = file;
-        hideLoading();
 
         videoView = new VideoView(this);
         root.addView(videoView, new FrameLayout.LayoutParams(
@@ -609,9 +536,10 @@ public final class RemoteMediaViewerActivity extends Activity {
 
         MediaController controller = new MediaController(this);
         videoView.setMediaController(controller);
-        videoView.setVideoPath(file.getAbsolutePath());
+        videoView.setVideoURI(uri);
         controller.setAnchorView(videoControllerAnchor);
         videoView.setOnPreparedListener(player -> {
+            hideLoading();
             player.setLooping(false);
             controller.setAnchorView(videoControllerAnchor);
             videoView.start();
@@ -851,50 +779,10 @@ public final class RemoteMediaViewerActivity extends Activity {
         finish();
     }
 
-    private void updateVideoProgress(long copied, long total) {
-        if (total <= 0L) {
-            main.post(() -> {
-                if (status != null) {
-                    status.setText("Loading video");
-                }
-            });
-            return;
-        }
-        int percent = (int) Math.min(100L, copied * 100L / total);
-        main.post(() -> {
-            if (status != null) {
-                status.setText(String.format(Locale.US, "Loading video %d%%", percent));
-            }
-        });
-    }
-
-    private String videoCacheName() throws Exception {
-        String extension = extensionFor(name);
-        String sourceKey = isRemote() ? url : uriString;
-        MessageDigest digest = MessageDigest.getInstance("SHA-1");
-        byte[] hash = digest.digest((sourceKey + "|" + size + "|" + modified).getBytes("UTF-8"));
-        StringBuilder builder = new StringBuilder("viewer_");
-        for (byte value : hash) {
-            builder.append(String.format(Locale.US, "%02x", value & 0xff));
-        }
-        builder.append(extension);
-        return builder.toString();
-    }
-
     private boolean isRemote() {
         return !TextUtils.isEmpty(url);
     }
 
-    private static String extensionFor(String fileName) {
-        if (fileName == null) {
-            return ".mp4";
-        }
-        int dot = fileName.lastIndexOf('.');
-        if (dot >= 0 && dot < fileName.length() - 1) {
-            return fileName.substring(dot).toLowerCase(Locale.US);
-        }
-        return ".mp4";
-    }
 
     private static int sampleSize(int width, int height, int target) {
         if (width <= 0 || height <= 0 || target <= 0) {
