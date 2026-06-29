@@ -132,6 +132,18 @@ def save_thumbnail(image: Image.Image, target: Path, quality: int) -> None:
     temp.replace(target)
 
 
+def find_ffmpeg() -> Optional[str]:
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path is not None:
+        return ffmpeg_path
+
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
 def extract_video_frame(source: Path, frame_path: Path, ffmpeg_path: str) -> Optional[str]:
     attempts = [
         [
@@ -255,9 +267,9 @@ def main() -> int:
     set_hidden(thumb_dir)
 
     media = list(iter_media(root, args.recursive))
-    ffmpeg_path = shutil.which("ffmpeg")
+    ffmpeg_path = find_ffmpeg()
     if ffmpeg_path is None and any(path.suffix.lower() in VIDEO_EXTENSIONS for path in media):
-        print("Video thumbnails require ffmpeg on PATH. Photo thumbnails will still be generated.")
+        print("Video thumbnails require ffmpeg or imageio-ffmpeg. Photo thumbnails will still be generated.")
 
     expected = {
         thumbnail_name(path.name, path.stat().st_size, int(path.stat().st_mtime * 1000))

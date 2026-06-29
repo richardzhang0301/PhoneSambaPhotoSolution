@@ -3,8 +3,17 @@ setlocal
 cd /d "%~dp0"
 
 set "PHOTO_DIR=%~1"
-if exist ".venv\Scripts\python.exe" (
-    set "PY_CMD=.venv\Scripts\python.exe"
+set "PY_CMD=.venv\Scripts\python.exe"
+set "REQ_FILE=%~dp0requirements.txt"
+set "VENV_CREATED=0"
+
+if not exist "%REQ_FILE%" (
+    echo Missing dependency file: %REQ_FILE%
+    exit /b 1
+)
+
+if exist "%PY_CMD%" (
+    rem Use the existing virtual environment.
 ) else (
     echo Creating Python virtual environment in .venv...
     where py >nul 2>nul
@@ -12,16 +21,41 @@ if exist ".venv\Scripts\python.exe" (
         py -3 -m venv .venv
     )
 
-    if not exist ".venv\Scripts\python.exe" (
+    if not exist "%PY_CMD%" (
         python -m venv .venv
     )
 
-    if not exist ".venv\Scripts\python.exe" (
+    if not exist "%PY_CMD%" (
         echo Failed to create Python virtual environment.
         exit /b 1
     )
 
-    set "PY_CMD=.venv\Scripts\python.exe"
+    set "VENV_CREATED=1"
+)
+
+if "%VENV_CREATED%"=="1" (
+    echo Installing Python dependencies...
+    "%PY_CMD%" -m pip install -r "%REQ_FILE%"
+    if errorlevel 1 (
+        echo Failed to install Python dependencies.
+        exit /b 1
+    )
+)
+
+"%PY_CMD%" -c "import PIL, imageio_ffmpeg" >nul 2>nul
+if errorlevel 1 (
+    echo Installing missing Python dependencies...
+    "%PY_CMD%" -m pip install -r "%REQ_FILE%"
+    if errorlevel 1 (
+        echo Failed to install Python dependencies.
+        exit /b 1
+    )
+
+    "%PY_CMD%" -c "import PIL, imageio_ffmpeg" >nul 2>nul
+    if errorlevel 1 (
+        echo Python dependencies are still missing after install.
+        exit /b 1
+    )
 )
 
 if "%PHOTO_DIR%"=="" (
@@ -35,18 +69,5 @@ if "%PHOTO_DIR%"=="" (
     exit /b 1
 )
 
-%PY_CMD% -c "import PIL" >nul 2>nul
-if errorlevel 1 (
-    echo Pillow is required to decode photos.
-    echo.
-    set /p "INSTALL=Install Pillow now? [Y/N]: "
-    if /I "%INSTALL%"=="Y" (
-        %PY_CMD% -m pip install Pillow
-    ) else (
-        echo Install later with: %PY_CMD% -m pip install Pillow
-        exit /b 1
-    )
-)
-
-%PY_CMD% "%~dp0generate_thumbnails.py" "%PHOTO_DIR%" --size 384 --quality 82 --workers 4 --prune
+"%PY_CMD%" "%~dp0generate_thumbnails.py" "%PHOTO_DIR%" --size 384 --quality 82 --workers 4 --prune
 pause
