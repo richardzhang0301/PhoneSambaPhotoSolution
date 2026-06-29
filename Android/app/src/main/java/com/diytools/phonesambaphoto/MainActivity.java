@@ -84,7 +84,7 @@ public final class MainActivity extends Activity {
             if (selectionMode) {
                 toggleLocalSelection(item);
             } else {
-                RemoteMediaViewerActivity.open(this, item);
+                RemoteMediaViewerActivity.openLocal(this, photos, position);
             }
         });
         localGrid.setOnItemLongClickListener((parent, view, position, id) -> {
@@ -98,7 +98,7 @@ public final class MainActivity extends Activity {
         remoteGrid.setOnItemClickListener((parent, view, position, id) -> {
             RemotePhotoItem item = remotePhotos.get(position);
             setStatus(item.name + "  " + sizeLabel(item.size));
-            RemoteMediaViewerActivity.open(this, item);
+            RemoteMediaViewerActivity.openRemote(this, remotePhotos, position);
         });
 
         selectTab(Tab.LOCAL);
