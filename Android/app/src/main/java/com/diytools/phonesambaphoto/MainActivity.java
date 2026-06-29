@@ -266,14 +266,14 @@ public final class MainActivity extends Activity {
                 if (remoteAdapter != null) {
                     remoteAdapter.notifyDataSetChanged();
                 }
-                setStatus("Set Samba folder to view remote photos");
+                setStatus("Set Samba folder to view remote media files");
                 showSettingsDialog();
                 return;
             }
             if (!remoteLoaded || !settings.identityKey().equals(remoteLoadedIdentity)) {
                 loadRemotePhotos();
             } else {
-                setStatus(remotePhotos.isEmpty() ? "No remote photos found" : remotePhotos.size() + " remote photos");
+                setStatus(remotePhotos.isEmpty() ? "No remote media found" : remotePhotos.size() + " remote media files");
             }
         }
     }
@@ -327,7 +327,7 @@ public final class MainActivity extends Activity {
             if (remoteAdapter != null) {
                 remoteAdapter.notifyDataSetChanged();
             }
-            setStatus("Set Samba folder to view remote photos");
+            setStatus("Set Samba folder to view remote media files");
             return;
         }
 
@@ -343,7 +343,7 @@ public final class MainActivity extends Activity {
                     remoteAdapter.setSettings(settings);
                     remoteAdapter.notifyDataSetChanged();
                     if (selectedTab == Tab.REMOTE) {
-                        setStatus(loaded.isEmpty() ? "No remote photos found" : loaded.size() + " remote photos");
+                        setStatus(loaded.isEmpty() ? "No remote media found" : loaded.size() + " remote media files");
                     }
                     updateButtons();
                 });
@@ -678,7 +678,3 @@ public final class MainActivity extends Activity {
         return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
     }
 }
-
-
-
-

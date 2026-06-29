@@ -1,11 +1,11 @@
 # PhoneSambaPhotoSolution
 
-A small solution for syncing phone photos to a Samba share and browsing both local and remote photos.
+A small solution for syncing phone photos to a Samba share and browsing local photos plus remote photos and videos.
 
 ## Folders
 
-- `Android/` - native Android app for local photo browsing, Samba upload, and remote Samba photo viewing.
-- `SambaTools/` - helper scripts for preparing fast remote photo thumbnails on the Samba folder.
+- `Android/` - native Android app for local photo browsing, Samba upload, and remote Samba photo/video viewing.
+- `SambaTools/` - helper scripts for preparing fast remote photo and video thumbnails on the Samba folder.
 
 ## Android App
 

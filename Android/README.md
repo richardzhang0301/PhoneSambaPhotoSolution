@@ -5,7 +5,7 @@ A small native Android app for browsing phone photos and sending them to a saved
 ## Features
 
 - Shows local photos from Android MediaStore in a fast thumbnail grid.
-- Shows remote photos from the saved Samba folder on a separate Samba tab.
+- Shows remote photos and videos from the saved Samba folder on a separate Samba tab.
 - Saves one Samba destination for repeat use.
 - One-tap sync for unsynced photos.
 - Multi-select upload for specific photos.
@@ -41,4 +41,4 @@ app/build/outputs/apk/debug/app-debug.apk
 ```
 ## Remote Thumbnail Speedup
 
-For faster previews on the `Samba` tab, generate sidecar thumbnails with the root `SambaTools/run.bat` tool. The app checks `.phonesamba_thumbs/` before falling back to full-size remote photos.
+For faster previews on the `Samba` tab, generate sidecar thumbnails with the root `SambaTools/run.bat` tool. The app checks `.phonesamba_thumbs/` before falling back to full-size remote photos. Video sidecar thumbnails are shown with a play overlay.

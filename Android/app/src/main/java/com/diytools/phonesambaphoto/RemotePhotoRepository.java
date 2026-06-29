@@ -39,7 +39,7 @@ final class RemotePhotoRepository {
                 continue;
             }
             String name = cleanName(file.getName());
-            if (!isImageName(name)) {
+            if (!isMediaName(name)) {
                 continue;
             }
             long size = file.length();
@@ -85,7 +85,7 @@ final class RemotePhotoRepository {
         return name;
     }
 
-    private static boolean isImageName(String name) {
+    private static boolean isMediaName(String name) {
         String lower = name.toLowerCase(Locale.US);
         return lower.endsWith(".jpg")
                 || lower.endsWith(".jpeg")
@@ -93,6 +93,19 @@ final class RemotePhotoRepository {
                 || lower.endsWith(".webp")
                 || lower.endsWith(".heic")
                 || lower.endsWith(".heif")
-                || lower.endsWith(".bmp");
+                || lower.endsWith(".bmp")
+                || lower.endsWith(".mp4")
+                || lower.endsWith(".m4v")
+                || lower.endsWith(".mov")
+                || lower.endsWith(".avi")
+                || lower.endsWith(".mkv")
+                || lower.endsWith(".webm")
+                || lower.endsWith(".3gp")
+                || lower.endsWith(".3g2")
+                || lower.endsWith(".wmv")
+                || lower.endsWith(".mpg")
+                || lower.endsWith(".mpeg")
+                || lower.endsWith(".mts")
+                || lower.endsWith(".m2ts");
     }
 }
