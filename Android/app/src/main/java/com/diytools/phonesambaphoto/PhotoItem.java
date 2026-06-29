@@ -12,6 +12,7 @@ final class PhotoItem {
     final boolean video;
     boolean selected;
     boolean uploaded;
+    boolean sambaExists;
 
     PhotoItem(long id, Uri uri, String name, long size, long dateModifiedSeconds, long dateTakenMillis, boolean uploaded, boolean video) {
         this.id = id;
@@ -21,6 +22,7 @@ final class PhotoItem {
         this.dateModifiedSeconds = dateModifiedSeconds;
         this.dateTakenMillis = dateTakenMillis;
         this.uploaded = uploaded;
+        this.sambaExists = uploaded;
         this.video = video;
     }
 

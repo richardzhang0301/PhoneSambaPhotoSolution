@@ -27,7 +27,10 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -326,7 +329,9 @@ public final class MainActivity extends Activity {
                 photos.addAll(loaded);
                 localLoaded = true;
                 localLoadedIdentity = settings.identityKey();
+                applyCachedSambaExists(settings);
                 adapter.notifyDataSetChanged();
+                refreshLocalSambaExists(settings);
                 if (selectedTab == Tab.LOCAL) {
                     setStatus(localMediaStatus(loaded.size()));
                 }
@@ -345,6 +350,10 @@ public final class MainActivity extends Activity {
         if (!settings.isConfigured()) {
             remotePhotos.clear();
             remoteLoaded = false;
+            clearSambaExists();
+            if (adapter != null) {
+                adapter.notifyDataSetChanged();
+            }
             if (remoteAdapter != null) {
                 remoteAdapter.notifyDataSetChanged();
             }
@@ -362,7 +371,11 @@ public final class MainActivity extends Activity {
                     remoteLoaded = true;
                     remoteLoadedIdentity = settings.identityKey();
                     remoteAdapter.setSettings(settings);
+                    applySambaExists(loaded);
                     remoteAdapter.notifyDataSetChanged();
+                    if (adapter != null) {
+                        adapter.notifyDataSetChanged();
+                    }
                     if (selectedTab == Tab.REMOTE) {
                         setStatus(loaded.isEmpty() ? "No remote media found" : loaded.size() + " remote media files");
                     }
@@ -372,7 +385,11 @@ public final class MainActivity extends Activity {
                 main.post(() -> {
                     remotePhotos.clear();
                     remoteLoaded = false;
+                    clearSambaExists();
                     remoteAdapter.notifyDataSetChanged();
+                    if (adapter != null) {
+                        adapter.notifyDataSetChanged();
+                    }
                     if (selectedTab == Tab.REMOTE) {
                         setStatus("Cannot read Samba folder");
                     }
@@ -380,6 +397,86 @@ public final class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    private void refreshLocalSambaExists(SambaSettings settings) {
+        if (!settings.isConfigured()) {
+            clearSambaExists();
+            if (adapter != null) {
+                adapter.notifyDataSetChanged();
+            }
+            return;
+        }
+        String identity = settings.identityKey();
+        if (remoteLoaded && identity.equals(remoteLoadedIdentity)) {
+            applySambaExists(remotePhotos);
+            if (adapter != null) {
+                adapter.notifyDataSetChanged();
+            }
+            return;
+        }
+        remoteExecutor.execute(() -> {
+            try {
+                List<RemotePhotoItem> loaded = RemotePhotoRepository.loadPhotos(settings);
+                main.post(() -> {
+                    if (!identity.equals(SambaSettings.load(this).identityKey())) {
+                        return;
+                    }
+                    remotePhotos.clear();
+                    remotePhotos.addAll(loaded);
+                    remoteLoaded = true;
+                    remoteLoadedIdentity = identity;
+                    if (remoteAdapter != null) {
+                        remoteAdapter.setSettings(settings);
+                        remoteAdapter.notifyDataSetChanged();
+                    }
+                    applySambaExists(loaded);
+                    if (adapter != null) {
+                        adapter.notifyDataSetChanged();
+                    }
+                    updateButtons();
+                });
+            } catch (Exception ignored) {
+                main.post(() -> {
+                    if (!identity.equals(SambaSettings.load(this).identityKey())) {
+                        return;
+                    }
+                    clearSambaExists();
+                    if (adapter != null) {
+                        adapter.notifyDataSetChanged();
+                    }
+                });
+            }
+        });
+    }
+
+    private void applyCachedSambaExists(SambaSettings settings) {
+        if (settings.isConfigured() && remoteLoaded && settings.identityKey().equals(remoteLoadedIdentity)) {
+            applySambaExists(remotePhotos);
+        } else {
+            clearSambaExists();
+        }
+    }
+
+    private void applySambaExists(List<RemotePhotoItem> remoteItems) {
+        Set<String> remoteKeys = new HashSet<>();
+        for (RemotePhotoItem remote : remoteItems) {
+            remoteKeys.add(sambaMatchKey(remote.name, remote.size, remote.video));
+        }
+        for (PhotoItem photo : photos) {
+            photo.sambaExists = photo.uploaded || remoteKeys.contains(sambaMatchKey(photo.name, photo.size, photo.video));
+        }
+    }
+
+    private void clearSambaExists() {
+        for (PhotoItem photo : photos) {
+            photo.sambaExists = photo.uploaded;
+        }
+    }
+
+    private static String sambaMatchKey(String name, long size, boolean video) {
+        String normalizedName = TextUtils.isEmpty(name) ? "" : name.toLowerCase(Locale.US);
+        return (video ? "video" : "image") + "|" + normalizedName + "|" + size;
     }
 
     private void syncAll() {
@@ -390,7 +487,7 @@ public final class MainActivity extends Activity {
         }
         List<PhotoItem> pending = new ArrayList<>();
         for (PhotoItem photo : photos) {
-            if (!photo.uploaded) {
+            if (!photo.uploaded && !photo.sambaExists) {
                 pending.add(photo);
             }
         }
@@ -450,6 +547,7 @@ public final class MainActivity extends Activity {
                         public void onItemFinished(PhotoItem item) {
                             main.post(() -> {
                                 item.selected = false;
+                                item.sambaExists = true;
                                 adapter.notifyDataSetChanged();
                             });
                         }

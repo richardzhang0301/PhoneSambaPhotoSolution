@@ -73,13 +73,13 @@ final class PhotoGridAdapter extends BaseAdapter {
             checkParams.setMargins(0, dp(7), dp(7), 0);
             item.addView(check, checkParams);
 
-            View uploaded = new View(context);
-            uploaded.setBackgroundResource(R.drawable.uploaded_dot);
-            FrameLayout.LayoutParams uploadedParams = new FrameLayout.LayoutParams(dp(10), dp(10), Gravity.BOTTOM | Gravity.END);
-            uploadedParams.setMargins(0, 0, dp(8), dp(8));
-            item.addView(uploaded, uploadedParams);
+            ImageView sambaCheck = new ImageView(context);
+            sambaCheck.setImageResource(R.drawable.ic_samba_exists);
+            FrameLayout.LayoutParams sambaParams = new FrameLayout.LayoutParams(dp(28), dp(28), Gravity.TOP | Gravity.START);
+            sambaParams.setMargins(dp(7), dp(7), 0, 0);
+            item.addView(sambaCheck, sambaParams);
 
-            holder = new Holder(image, play, overlay, check, uploaded);
+            holder = new Holder(image, play, overlay, check, sambaCheck);
             item.setTag(holder);
             convertView = item;
         } else {
@@ -91,7 +91,7 @@ final class PhotoGridAdapter extends BaseAdapter {
         holder.play.setVisibility(photo.video ? View.VISIBLE : View.GONE);
         holder.overlay.setVisibility(photo.selected ? View.VISIBLE : View.GONE);
         holder.check.setVisibility(photo.selected ? View.VISIBLE : View.GONE);
-        holder.uploaded.setVisibility(photo.uploaded ? View.VISIBLE : View.GONE);
+        holder.sambaCheck.setVisibility(photo.sambaExists ? View.VISIBLE : View.GONE);
         return convertView;
     }
 
@@ -104,14 +104,14 @@ final class PhotoGridAdapter extends BaseAdapter {
         final ImageView play;
         final View overlay;
         final ImageView check;
-        final View uploaded;
+        final ImageView sambaCheck;
 
-        Holder(ImageView image, ImageView play, View overlay, ImageView check, View uploaded) {
+        Holder(ImageView image, ImageView play, View overlay, ImageView check, ImageView sambaCheck) {
             this.image = image;
             this.play = play;
             this.overlay = overlay;
             this.check = check;
-            this.uploaded = uploaded;
+            this.sambaCheck = sambaCheck;
         }
     }
 
