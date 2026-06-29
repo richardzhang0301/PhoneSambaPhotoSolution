@@ -20,22 +20,23 @@ final class ThumbLoader {
     private final Context context;
     private final ExecutorService executor = Executors.newFixedThreadPool(3);
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final LruCache<Long, Bitmap> cache;
+    private final LruCache<String, Bitmap> cache;
 
     ThumbLoader(Context context) {
         this.context = context.getApplicationContext();
         int maxKb = (int) (Runtime.getRuntime().maxMemory() / 1024);
-        this.cache = new LruCache<Long, Bitmap>(Math.max(4096, maxKb / 8)) {
+        this.cache = new LruCache<String, Bitmap>(Math.max(4096, maxKb / 8)) {
             @Override
-            protected int sizeOf(Long key, Bitmap value) {
+            protected int sizeOf(String key, Bitmap value) {
                 return value.getByteCount() / 1024;
             }
         };
     }
 
     void load(ImageView imageView, PhotoItem item, int sizePx) {
-        imageView.setTag(item.id);
-        Bitmap cached = cache.get(item.id);
+        String cacheKey = item.mediaKey();
+        imageView.setTag(cacheKey);
+        Bitmap cached = cache.get(cacheKey);
         if (cached != null) {
             imageView.setImageBitmap(cached);
             return;
@@ -48,10 +49,10 @@ final class ThumbLoader {
             if (bitmap == null) {
                 return;
             }
-            cache.put(item.id, bitmap);
+            cache.put(cacheKey, bitmap);
             main.post(() -> {
                 Object tag = imageView.getTag();
-                if (tag instanceof Long && ((Long) tag) == item.id) {
+                if (cacheKey.equals(tag)) {
                     imageView.setImageBitmap(bitmap);
                 }
             });
@@ -67,6 +68,14 @@ final class ThumbLoader {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 return resolver.loadThumbnail(item.uri, new Size(sizePx, sizePx), new CancellationSignal());
+            }
+            if (item.video) {
+                return MediaStore.Video.Thumbnails.getThumbnail(
+                        resolver,
+                        item.id,
+                        MediaStore.Video.Thumbnails.MINI_KIND,
+                        null
+                );
             }
             return MediaStore.Images.Thumbnails.getThumbnail(
                     resolver,

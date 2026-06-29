@@ -4,8 +4,8 @@ A small native Android app for browsing phone photos and sending them to a saved
 
 ## Features
 
-- Shows local photos from Android MediaStore in a fast thumbnail grid.
-- Shows remote photos and videos from the saved Samba folder on a separate Samba tab.
+- Shows local photos and videos from Android MediaStore in a fast thumbnail grid, with fullscreen photo zoom and fullscreen video playback.
+- Shows remote photos and videos from the saved Samba folder on a separate Samba tab, with fullscreen photo zoom and fullscreen video playback.
 - Saves one Samba destination for repeat use.
 - One-tap sync for unsynced photos.
 - Multi-select upload for specific photos.

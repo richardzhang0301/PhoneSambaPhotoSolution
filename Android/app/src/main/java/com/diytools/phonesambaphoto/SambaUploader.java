@@ -101,7 +101,7 @@ final class SambaUploader {
 
         try (InputStream rawInput = resolver.openInputStream(item.uri)) {
             if (rawInput == null) {
-                throw new IOException("Photo cannot be opened");
+                throw new IOException("Media cannot be opened");
             }
             try (BufferedInputStream input = new BufferedInputStream(rawInput);
                  BufferedOutputStream output = new BufferedOutputStream(new SmbFileOutputStream(target))) {
@@ -150,4 +150,3 @@ final class SambaUploader {
         SKIPPED
     }
 }
-

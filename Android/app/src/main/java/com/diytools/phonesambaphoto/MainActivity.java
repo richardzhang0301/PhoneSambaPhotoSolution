@@ -60,11 +60,13 @@ public final class MainActivity extends Activity {
     private Button remoteTabButton;
     private Button syncAllButton;
     private Button uploadSelectedButton;
+    private Button cancelSelectionButton;
     private Button sambaSetupButton;
     private Tab selectedTab = Tab.LOCAL;
     private boolean uploading;
     private boolean localLoaded;
     private boolean remoteLoaded;
+    private boolean selectionMode;
     private String localLoadedIdentity = "";
     private String remoteLoadedIdentity = "";
 
@@ -79,9 +81,15 @@ public final class MainActivity extends Activity {
         localGrid.setAdapter(adapter);
         localGrid.setOnItemClickListener((parent, view, position, id) -> {
             PhotoItem item = photos.get(position);
-            item.selected = !item.selected;
-            adapter.notifyDataSetChanged();
-            updateButtons();
+            if (selectionMode) {
+                toggleLocalSelection(item);
+            } else {
+                RemoteMediaViewerActivity.open(this, item);
+            }
+        });
+        localGrid.setOnItemLongClickListener((parent, view, position, id) -> {
+            enterSelectionMode(photos.get(position));
+            return true;
         });
 
         SambaSettings settings = SambaSettings.load(this);
@@ -90,6 +98,7 @@ public final class MainActivity extends Activity {
         remoteGrid.setOnItemClickListener((parent, view, position, id) -> {
             RemotePhotoItem item = remotePhotos.get(position);
             setStatus(item.name + "  " + sizeLabel(item.size));
+            RemoteMediaViewerActivity.open(this, item);
         });
 
         selectTab(Tab.LOCAL);
@@ -112,10 +121,10 @@ public final class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQUEST_IMAGES && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+        if (requestCode == REQUEST_IMAGES && hasPhotoPermission()) {
             loadPhotos();
         } else if (selectedTab == Tab.LOCAL) {
-            setStatus("Photo permission is needed to show the gallery");
+            setStatus("Media permission is needed to show the gallery");
         }
     }
 
@@ -194,7 +203,13 @@ public final class MainActivity extends Activity {
 
         uploadSelectedButton = secondaryButton("Upload selected", R.drawable.ic_upload);
         uploadSelectedButton.setOnClickListener(v -> uploadSelected());
-        buttonRow.addView(uploadSelectedButton, new LinearLayout.LayoutParams(0, dp(44), 1));
+        LinearLayout.LayoutParams uploadParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+        uploadParams.setMargins(0, 0, dp(8), 0);
+        buttonRow.addView(uploadSelectedButton, uploadParams);
+
+        cancelSelectionButton = secondaryButton("Done", R.drawable.ic_close);
+        cancelSelectionButton.setOnClickListener(v -> exitSelectionMode());
+        buttonRow.addView(cancelSelectionButton, new LinearLayout.LayoutParams(0, dp(44), 1));
         actions.addView(buttonRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
 
         status = new TextView(this);
@@ -240,6 +255,10 @@ public final class MainActivity extends Activity {
 
     private void selectTab(Tab tab) {
         selectedTab = tab;
+        if (tab != Tab.LOCAL && selectionMode) {
+            selectionMode = false;
+            clearLocalSelection();
+        }
         if (localGrid != null) {
             localGrid.setVisibility(tab == Tab.LOCAL ? View.VISIBLE : View.GONE);
         }
@@ -258,7 +277,7 @@ public final class MainActivity extends Activity {
                     requestPhotoPermission();
                 }
             } else {
-                setStatus(photos.isEmpty() ? "No photos found" : photos.size() + " photos");
+                setStatus(localMediaStatus(photos.size()));
             }
         } else {
             if (!settings.isConfigured()) {
@@ -284,6 +303,7 @@ public final class MainActivity extends Activity {
             remoteThumbLoader.clear();
             loadRemotePhotos();
         } else {
+            exitSelectionMode();
             localLoaded = false;
             loadPhotos();
         }
@@ -295,19 +315,20 @@ public final class MainActivity extends Activity {
             return;
         }
         if (selectedTab == Tab.LOCAL) {
-            setStatus("Scanning photos");
+            setStatus("Scanning media");
         }
         scanExecutor.execute(() -> {
             SambaSettings settings = SambaSettings.load(getApplicationContext());
             List<PhotoItem> loaded = PhotoRepository.loadPhotos(getApplicationContext(), settings);
             main.post(() -> {
+                selectionMode = false;
                 photos.clear();
                 photos.addAll(loaded);
                 localLoaded = true;
                 localLoadedIdentity = settings.identityKey();
                 adapter.notifyDataSetChanged();
                 if (selectedTab == Tab.LOCAL) {
-                    setStatus(loaded.isEmpty() ? "No photos found" : loaded.size() + " photos");
+                    setStatus(localMediaStatus(loaded.size()));
                 }
                 updateDestinationLabel();
                 updateButtons();
@@ -374,13 +395,16 @@ public final class MainActivity extends Activity {
             }
         }
         if (pending.isEmpty()) {
-            setStatus("All photos are synced");
+            setStatus("All media is synced");
             return;
         }
         startUpload(settings, pending);
     }
 
     private void uploadSelected() {
+        if (!selectionMode) {
+            return;
+        }
         SambaSettings settings = SambaSettings.load(this);
         if (!settings.isConfigured()) {
             showSettingsDialog();
@@ -393,7 +417,7 @@ public final class MainActivity extends Activity {
             }
         }
         if (selected.isEmpty()) {
-            setStatus("Select photos to upload");
+            setStatus("Select media to upload");
             return;
         }
         startUpload(settings, selected);
@@ -436,6 +460,8 @@ public final class MainActivity extends Activity {
                 remoteLoaded = false;
                 remoteThumbLoader.clear();
                 progress.setVisibility(View.GONE);
+                selectionMode = false;
+                clearLocalSelection();
                 adapter.notifyDataSetChanged();
                 updateButtons();
                 setStatus("Uploaded " + summary.uploaded + "  Skipped " + summary.skipped + "  Failed " + summary.failed);
@@ -528,6 +554,66 @@ public final class MainActivity extends Activity {
         destination.setText(SambaSettings.load(this).displayName());
     }
 
+    private void enterSelectionMode(PhotoItem item) {
+        if (uploading) {
+            return;
+        }
+        selectionMode = true;
+        item.selected = true;
+        adapter.notifyDataSetChanged();
+        updateButtons();
+        updateSelectionStatus();
+    }
+
+    private void toggleLocalSelection(PhotoItem item) {
+        if (!selectionMode || uploading) {
+            return;
+        }
+        item.selected = !item.selected;
+        adapter.notifyDataSetChanged();
+        updateButtons();
+        updateSelectionStatus();
+    }
+
+    private void exitSelectionMode() {
+        if (!selectionMode || uploading) {
+            return;
+        }
+        selectionMode = false;
+        clearLocalSelection();
+        if (adapter != null) {
+            adapter.notifyDataSetChanged();
+        }
+        updateButtons();
+        if (selectedTab == Tab.LOCAL) {
+            setStatus(localMediaStatus(photos.size()));
+        }
+    }
+
+    private void clearLocalSelection() {
+        for (PhotoItem item : photos) {
+            item.selected = false;
+        }
+    }
+
+    private int selectedLocalCount() {
+        int selected = 0;
+        for (PhotoItem item : photos) {
+            if (item.selected) {
+                selected++;
+            }
+        }
+        return selected;
+    }
+
+    private void updateSelectionStatus() {
+        int selected = selectedLocalCount();
+        setStatus(selected == 1 ? "1 selected" : selected + " selected");
+    }
+
+    private String localMediaStatus(int count) {
+        return count == 0 ? "No media found" : count + " media files";
+    }
     private void updateButtons() {
         if (localTabButton != null && remoteTabButton != null) {
             updateTabButton(localTabButton, selectedTab == Tab.LOCAL);
@@ -539,20 +625,19 @@ public final class MainActivity extends Activity {
         if (sambaSetupButton != null) {
             sambaSetupButton.setEnabled(!uploading);
         }
-        if (syncAllButton == null || uploadSelectedButton == null) {
+        if (syncAllButton == null || uploadSelectedButton == null || cancelSelectionButton == null) {
             return;
         }
 
-        int selected = 0;
-        for (PhotoItem item : photos) {
-            if (item.selected) {
-                selected++;
-            }
-        }
+        int selected = selectedLocalCount();
         boolean localVisible = selectedTab == Tab.LOCAL;
+        syncAllButton.setVisibility(selectionMode ? View.GONE : View.VISIBLE);
+        uploadSelectedButton.setVisibility(selectionMode ? View.VISIBLE : View.GONE);
+        cancelSelectionButton.setVisibility(selectionMode ? View.VISIBLE : View.GONE);
         syncAllButton.setEnabled(localVisible && !uploading && !photos.isEmpty());
-        uploadSelectedButton.setEnabled(localVisible && !uploading && selected > 0);
+        uploadSelectedButton.setEnabled(localVisible && selectionMode && !uploading && selected > 0);
         uploadSelectedButton.setText(selected > 0 ? "Upload " + selected : "Upload selected");
+        cancelSelectionButton.setEnabled(localVisible && selectionMode && !uploading);
     }
 
     private void updateTabButton(Button button, boolean selected) {
@@ -568,10 +653,11 @@ public final class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return true;
         }
-        String permission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-                ? Manifest.permission.READ_MEDIA_IMAGES
-                : Manifest.permission.READ_EXTERNAL_STORAGE;
-        return checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+                    && checkSelfPermission(Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED;
+        }
+        return checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
     }
 
     private void requestPhotoPermission() {
@@ -579,10 +665,14 @@ public final class MainActivity extends Activity {
             loadPhotos();
             return;
         }
-        String permission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-                ? Manifest.permission.READ_MEDIA_IMAGES
-                : Manifest.permission.READ_EXTERNAL_STORAGE;
-        requestPermissions(new String[]{permission}, REQUEST_IMAGES);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            requestPermissions(new String[]{
+                    Manifest.permission.READ_MEDIA_IMAGES,
+                    Manifest.permission.READ_MEDIA_VIDEO
+            }, REQUEST_IMAGES);
+        } else {
+            requestPermissions(new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, REQUEST_IMAGES);
+        }
     }
 
     private Button primaryButton(String text, int icon) {

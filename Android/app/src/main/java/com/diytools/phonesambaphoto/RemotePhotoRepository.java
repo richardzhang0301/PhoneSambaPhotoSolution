@@ -39,7 +39,8 @@ final class RemotePhotoRepository {
                 continue;
             }
             String name = cleanName(file.getName());
-            if (!isMediaName(name)) {
+            boolean video = isVideoName(name);
+            if (!video && !isImageName(name)) {
                 continue;
             }
             long size = file.length();
@@ -50,7 +51,8 @@ final class RemotePhotoRepository {
                     settings.fileUrl(name),
                     settings.childUrl(THUMB_DIR + "/" + thumbnailName),
                     size,
-                    modified
+                    modified,
+                    video
             ));
         }
 
@@ -85,7 +87,7 @@ final class RemotePhotoRepository {
         return name;
     }
 
-    private static boolean isMediaName(String name) {
+    private static boolean isImageName(String name) {
         String lower = name.toLowerCase(Locale.US);
         return lower.endsWith(".jpg")
                 || lower.endsWith(".jpeg")
@@ -93,8 +95,12 @@ final class RemotePhotoRepository {
                 || lower.endsWith(".webp")
                 || lower.endsWith(".heic")
                 || lower.endsWith(".heif")
-                || lower.endsWith(".bmp")
-                || lower.endsWith(".mp4")
+                || lower.endsWith(".bmp");
+    }
+
+    private static boolean isVideoName(String name) {
+        String lower = name.toLowerCase(Locale.US);
+        return lower.endsWith(".mp4")
                 || lower.endsWith(".m4v")
                 || lower.endsWith(".mov")
                 || lower.endsWith(".avi")

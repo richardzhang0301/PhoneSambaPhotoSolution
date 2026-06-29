@@ -37,7 +37,7 @@ final class PhotoGridAdapter extends BaseAdapter {
 
     @Override
     public long getItemId(int position) {
-        return photos.get(position).id;
+        return photos.get(position).mediaKey().hashCode();
     }
 
     @Override
@@ -54,6 +54,11 @@ final class PhotoGridAdapter extends BaseAdapter {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
             ));
+
+            ImageView play = new ImageView(context);
+            play.setImageResource(R.drawable.ic_play_circle);
+            FrameLayout.LayoutParams playParams = new FrameLayout.LayoutParams(dp(42), dp(42), Gravity.CENTER);
+            item.addView(play, playParams);
 
             View overlay = new View(context);
             overlay.setBackgroundColor(Color.argb(106, 23, 104, 172));
@@ -74,7 +79,7 @@ final class PhotoGridAdapter extends BaseAdapter {
             uploadedParams.setMargins(0, 0, dp(8), dp(8));
             item.addView(uploaded, uploadedParams);
 
-            holder = new Holder(image, overlay, check, uploaded);
+            holder = new Holder(image, play, overlay, check, uploaded);
             item.setTag(holder);
             convertView = item;
         } else {
@@ -83,6 +88,7 @@ final class PhotoGridAdapter extends BaseAdapter {
 
         PhotoItem photo = getItem(position);
         thumbLoader.load(holder.image, photo, itemSizePx);
+        holder.play.setVisibility(photo.video ? View.VISIBLE : View.GONE);
         holder.overlay.setVisibility(photo.selected ? View.VISIBLE : View.GONE);
         holder.check.setVisibility(photo.selected ? View.VISIBLE : View.GONE);
         holder.uploaded.setVisibility(photo.uploaded ? View.VISIBLE : View.GONE);
@@ -95,12 +101,14 @@ final class PhotoGridAdapter extends BaseAdapter {
 
     private static final class Holder {
         final ImageView image;
+        final ImageView play;
         final View overlay;
         final ImageView check;
         final View uploaded;
 
-        Holder(ImageView image, View overlay, ImageView check, View uploaded) {
+        Holder(ImageView image, ImageView play, View overlay, ImageView check, View uploaded) {
             this.image = image;
+            this.play = play;
             this.overlay = overlay;
             this.check = check;
             this.uploaded = uploaded;
@@ -118,4 +126,3 @@ final class PhotoGridAdapter extends BaseAdapter {
         }
     }
 }
-
