@@ -10,12 +10,11 @@ final class PhotoItem {
     final long dateModifiedSeconds;
     final long dateTakenMillis;
     final boolean video;
-    final boolean googleDrive;
     boolean selected;
     boolean uploaded;
     boolean sambaExists;
 
-    PhotoItem(long id, Uri uri, String name, long size, long dateModifiedSeconds, long dateTakenMillis, boolean uploaded, boolean video, boolean googleDrive) {
+    PhotoItem(long id, Uri uri, String name, long size, long dateModifiedSeconds, long dateTakenMillis, boolean uploaded, boolean video) {
         this.id = id;
         this.uri = uri;
         this.name = name;
@@ -25,7 +24,6 @@ final class PhotoItem {
         this.uploaded = uploaded;
         this.sambaExists = uploaded;
         this.video = video;
-        this.googleDrive = googleDrive;
     }
 
     String mediaKey() {

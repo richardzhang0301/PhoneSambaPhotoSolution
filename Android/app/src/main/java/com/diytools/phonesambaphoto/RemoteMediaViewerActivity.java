@@ -1,8 +1,13 @@
 package com.diytools.phonesambaphoto;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.PendingIntent;
+import android.app.RecoverableSecurityException;
 import android.content.Context;
+import android.content.ContentUris;
 import android.content.Intent;
+import android.content.IntentSender;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -13,9 +18,11 @@ import android.graphics.drawable.GradientDrawable;
 import android.media.MediaDataSource;
 import android.media.MediaPlayer;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.view.GestureDetector;
@@ -27,18 +34,22 @@ import android.view.TextureView;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
+import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.MediaController;
 import android.widget.ProgressBar;
 import android.widget.TextView;
+import android.widget.Toast;
 import android.widget.VideoView;
 
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -58,8 +69,11 @@ public final class RemoteMediaViewerActivity extends Activity {
     private static final String EXTRA_MODIFIED = "modified";
     private static final String EXTRA_VIDEO = "video";
     private static final String EXTRA_INDEX = "index";
+    private static final int REQUEST_DELETE_LOCAL = 2001;
     private static final Object NAVIGATION_LOCK = new Object();
+    private static final Object MEDIA_CHANGED_LOCK = new Object();
     private static ArrayList<ViewerItem> navigationSession = new ArrayList<>();
+    private static boolean mediaChanged;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -68,6 +82,9 @@ public final class RemoteMediaViewerActivity extends Activity {
     private ProgressBar progress;
     private TextView status;
     private ImageButton backButton;
+    private LinearLayout actionBar;
+    private Button uploadButton;
+    private Button deleteButton;
     private ImageView thumbnailView;
     private ZoomImageView photoView;
     private VideoView videoView;
@@ -91,6 +108,7 @@ public final class RemoteMediaViewerActivity extends Activity {
     private boolean mediaNavigationInProgress;
     private int remoteVideoWidth;
     private int remoteVideoHeight;
+    private boolean actionInProgress;
 
     static void open(Context context, RemotePhotoItem item) {
         ArrayList<ViewerItem> items = new ArrayList<>();
@@ -138,6 +156,20 @@ public final class RemoteMediaViewerActivity extends Activity {
     private static ArrayList<ViewerItem> navigationSessionSnapshot() {
         synchronized (NAVIGATION_LOCK) {
             return new ArrayList<>(navigationSession);
+        }
+    }
+
+    static boolean consumeMediaChanged() {
+        synchronized (MEDIA_CHANGED_LOCK) {
+            boolean changed = mediaChanged;
+            mediaChanged = false;
+            return changed;
+        }
+    }
+
+    private static void markMediaChanged() {
+        synchronized (MEDIA_CHANGED_LOCK) {
+            mediaChanged = true;
         }
     }
 
@@ -190,6 +222,7 @@ public final class RemoteMediaViewerActivity extends Activity {
         root.setBackgroundColor(Color.BLACK);
         setContentView(root);
         addBackButton();
+        addActionButtons();
         enterImmersiveMode();
 
         if (video) {
@@ -225,6 +258,23 @@ public final class RemoteMediaViewerActivity extends Activity {
         executor.shutdownNow();
         releaseRemoteVideoPlayer();
         removeVideoViews();
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_DELETE_LOCAL) {
+            return;
+        }
+        actionInProgress = false;
+        updateActionButtons();
+        if (resultCode == RESULT_OK) {
+            markMediaChanged();
+            showActionToast("Deleted");
+            afterDeleteCurrentItem();
+        } else {
+            showActionToast("Delete cancelled");
+        }
     }
 
     @Override
@@ -564,7 +614,7 @@ public final class RemoteMediaViewerActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
         );
-        anchorParams.setMargins(0, 0, 0, dp(56));
+        anchorParams.setMargins(0, 0, 0, videoControllerBottomMargin());
         root.addView(videoControllerAnchor, anchorParams);
     }
 
@@ -688,7 +738,7 @@ public final class RemoteMediaViewerActivity extends Activity {
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM
         );
-        statusParams.setMargins(dp(16), dp(16), dp(16), dp(36));
+        statusParams.setMargins(dp(16), dp(16), dp(16), bottomStatusMargin());
         root.addView(status, statusParams);
         bringOverlayControlsToFront();
     }
@@ -723,6 +773,256 @@ public final class RemoteMediaViewerActivity extends Activity {
         bringOverlayControlsToFront();
     }
 
+    private void uploadLocalCurrentItem() {
+        if (actionInProgress || isRemote() || TextUtils.isEmpty(uriString)) {
+            return;
+        }
+        SambaSettings settings = SambaSettings.load(this);
+        if (!settings.isConfigured()) {
+            showActionToast("Set Samba folder first");
+            return;
+        }
+
+        ArrayList<PhotoItem> item = new ArrayList<>();
+        item.add(currentLocalPhotoItem());
+        actionInProgress = true;
+        updateActionButtons();
+        showLoading("Uploading");
+
+        executor.execute(() -> {
+            SambaUploader.Summary summary = SambaUploader.upload(
+                    getApplicationContext(),
+                    settings,
+                    item,
+                    new SambaUploader.Listener() {
+                        @Override
+                        public void onProgress(int done, int total, String message) {
+                            main.post(() -> updateLoadingMessage(message));
+                        }
+
+                        @Override
+                        public void onItemFinished(PhotoItem item) {
+                        }
+                    }
+            );
+
+            main.post(() -> {
+                actionInProgress = false;
+                hideLoading();
+                updateActionButtons();
+                if (summary.failed == 0) {
+                    markMediaChanged();
+                    if (uploadButton != null) {
+                        uploadButton.setEnabled(false);
+                    }
+                    showActionToast(summary.skipped > 0 ? "Already synced" : "Upload complete");
+                } else {
+                    showActionToast("Upload failed");
+                }
+                bringOverlayControlsToFront();
+            });
+        });
+    }
+
+    private PhotoItem currentLocalPhotoItem() {
+        Uri uri = Uri.parse(uriString);
+        long id = 0L;
+        try {
+            id = ContentUris.parseId(uri);
+        } catch (RuntimeException ignored) {
+            // Some providers do not expose a numeric media id.
+        }
+        long modifiedSeconds = modified > 0L ? modified / 1000L : 0L;
+        String itemName = TextUtils.isEmpty(name) ? uri.getLastPathSegment() : name;
+        if (TextUtils.isEmpty(itemName)) {
+            itemName = video ? "video" : "photo";
+        }
+        return new PhotoItem(id, uri, itemName, size, modifiedSeconds, modified, false, video);
+    }
+
+    private void confirmDeleteCurrentItem() {
+        if (actionInProgress) {
+            return;
+        }
+        String mediaName = TextUtils.isEmpty(name) ? "this media" : "\"" + name + "\"";
+        String title = isRemote() ? "Delete from Samba?" : "Delete from phone?";
+        String source = isRemote() ? "Samba" : "this phone";
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage("Delete " + mediaName + " from " + source + "? This cannot be undone.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Delete", (d, which) -> deleteCurrentItem())
+                .create();
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(Color.rgb(190, 34, 34)));
+        dialog.show();
+    }
+
+    private void deleteCurrentItem() {
+        if (isRemote()) {
+            deleteRemoteCurrentItem();
+        } else {
+            deleteLocalCurrentItem();
+        }
+    }
+
+    private void deleteRemoteCurrentItem() {
+        if (TextUtils.isEmpty(url)) {
+            showActionToast("Nothing to delete");
+            return;
+        }
+        stopCurrentPlaybackForAction();
+        actionInProgress = true;
+        updateActionButtons();
+        showLoading("Deleting");
+
+        executor.execute(() -> {
+            boolean deleted = false;
+            try {
+                SambaSettings settings = SambaSettings.load(this);
+                CIFSContext context = SambaUploader.createContext(settings);
+                SmbFile file = new SmbFile(url, context);
+                if (file.exists()) {
+                    file.delete();
+                }
+                deleteRemoteThumbnail(context);
+                deleted = true;
+            } catch (Exception ignored) {
+            }
+            boolean success = deleted;
+            main.post(() -> {
+                actionInProgress = false;
+                hideLoading();
+                updateActionButtons();
+                if (success) {
+                    markMediaChanged();
+                    showActionToast("Deleted");
+                    afterDeleteCurrentItem();
+                } else {
+                    showActionToast("Delete failed");
+                    bringOverlayControlsToFront();
+                }
+            });
+        });
+    }
+
+    private void deleteRemoteThumbnail(CIFSContext context) {
+        if (TextUtils.isEmpty(thumbnailUrl)) {
+            return;
+        }
+        try {
+            SmbFile thumbnail = new SmbFile(thumbnailUrl, context);
+            if (thumbnail.exists()) {
+                thumbnail.delete();
+            }
+        } catch (Exception ignored) {
+            // The main file is what matters; stale thumbnail cleanup is best effort.
+        }
+    }
+
+    private void deleteLocalCurrentItem() {
+        if (TextUtils.isEmpty(uriString)) {
+            showActionToast("Nothing to delete");
+            return;
+        }
+        stopCurrentPlaybackForAction();
+        Uri uri = Uri.parse(uriString);
+        actionInProgress = true;
+        updateActionButtons();
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            requestLocalDeletePermission(uri);
+            return;
+        }
+
+        try {
+            int deleted = getContentResolver().delete(uri, null, null);
+            actionInProgress = false;
+            updateActionButtons();
+            if (deleted > 0) {
+                markMediaChanged();
+                showActionToast("Deleted");
+                afterDeleteCurrentItem();
+            } else {
+                showActionToast("Delete failed");
+            }
+        } catch (SecurityException exc) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && exc instanceof RecoverableSecurityException) {
+                requestRecoverableLocalDelete((RecoverableSecurityException) exc);
+            } else {
+                actionInProgress = false;
+                updateActionButtons();
+                showActionToast("Delete not allowed");
+            }
+        }
+    }
+
+    private void requestLocalDeletePermission(Uri uri) {
+        try {
+            PendingIntent deleteRequest = MediaStore.createDeleteRequest(getContentResolver(), Collections.singletonList(uri));
+            startIntentSenderForResult(deleteRequest.getIntentSender(), REQUEST_DELETE_LOCAL, null, 0, 0, 0);
+        } catch (IntentSender.SendIntentException | RuntimeException exc) {
+            actionInProgress = false;
+            updateActionButtons();
+            showActionToast("Delete not allowed");
+        }
+    }
+
+    private void requestRecoverableLocalDelete(RecoverableSecurityException exc) {
+        try {
+            PendingIntent actionIntent = exc.getUserAction().getActionIntent();
+            startIntentSenderForResult(actionIntent.getIntentSender(), REQUEST_DELETE_LOCAL, null, 0, 0, 0);
+        } catch (IntentSender.SendIntentException | RuntimeException sendExc) {
+            actionInProgress = false;
+            updateActionButtons();
+            showActionToast("Delete not allowed");
+        }
+    }
+
+    private void stopCurrentPlaybackForAction() {
+        if (videoView != null) {
+            videoView.stopPlayback();
+        }
+        releaseRemoteVideoPlayer();
+    }
+
+    private void afterDeleteCurrentItem() {
+        removeCurrentNavigationItem();
+        if (!navigationItems.isEmpty()) {
+            int nextIndex = Math.min(currentIndex, navigationItems.size() - 1);
+            setNavigationSession(navigationItems);
+            startActivity(intentFor(this, navigationItems.get(nextIndex), nextIndex));
+            overridePendingTransition(0, 0);
+        }
+        finish();
+    }
+
+    private void removeCurrentNavigationItem() {
+        if (currentIndex >= 0 && currentIndex < navigationItems.size()) {
+            navigationItems.remove(currentIndex);
+            return;
+        }
+        String currentRemote = url;
+        String currentLocal = uriString;
+        for (int index = 0; index < navigationItems.size(); index++) {
+            ViewerItem item = navigationItems.get(index);
+            if (TextUtils.equals(currentRemote, item.url) && TextUtils.equals(currentLocal, item.uriString)) {
+                navigationItems.remove(index);
+                currentIndex = Math.min(index, navigationItems.size());
+                return;
+            }
+        }
+    }
+
+    private void updateLoadingMessage(String message) {
+        if (status != null) {
+            status.setText(message);
+        }
+    }
+
+    private void showActionToast(String message) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+    }
+
     private void addBackButton() {
         backButton = new ImageButton(this);
         backButton.setImageResource(R.drawable.ic_arrow_back);
@@ -740,6 +1040,66 @@ public final class RemoteMediaViewerActivity extends Activity {
         root.addView(backButton, params);
     }
 
+    private void addActionButtons() {
+        actionBar = new LinearLayout(this);
+        actionBar.setGravity(Gravity.CENTER);
+        actionBar.setOrientation(LinearLayout.HORIZONTAL);
+
+        if (isRemote()) {
+            actionBar.addView(new View(this), new LinearLayout.LayoutParams(0, dp(44), 1));
+            deleteButton = actionButton("Delete", true);
+            deleteButton.setOnClickListener(view -> confirmDeleteCurrentItem());
+            actionBar.addView(deleteButton, new LinearLayout.LayoutParams(0, dp(44), 1));
+            actionBar.addView(new View(this), new LinearLayout.LayoutParams(0, dp(44), 1));
+        } else {
+            uploadButton = actionButton("Upload", false);
+            uploadButton.setOnClickListener(view -> uploadLocalCurrentItem());
+            LinearLayout.LayoutParams uploadParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+            uploadParams.setMargins(0, 0, dp(8), 0);
+            actionBar.addView(uploadButton, uploadParams);
+
+            deleteButton = actionButton("Delete", true);
+            deleteButton.setOnClickListener(view -> confirmDeleteCurrentItem());
+            actionBar.addView(deleteButton, new LinearLayout.LayoutParams(0, dp(44), 1));
+        }
+
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM
+        );
+        params.setMargins(dp(14), 0, dp(14), bottomControlMargin());
+        root.addView(actionBar, params);
+        updateActionButtons();
+    }
+
+    private Button actionButton(String text, boolean destructive) {
+        Button button = new Button(this);
+        button.setAllCaps(false);
+        button.setText(text);
+        button.setTextSize(14);
+        button.setTextColor(Color.WHITE);
+        button.setGravity(Gravity.CENTER);
+        button.setMinHeight(0);
+        button.setMinWidth(0);
+        button.setPadding(dp(10), 0, dp(10), 0);
+
+        GradientDrawable background = new GradientDrawable();
+        background.setCornerRadius(dp(7));
+        background.setColor(destructive ? Color.rgb(190, 34, 34) : Color.rgb(23, 104, 172));
+        button.setBackground(background);
+        return button;
+    }
+
+    private void updateActionButtons() {
+        if (uploadButton != null) {
+            uploadButton.setEnabled(!actionInProgress && !isRemote());
+        }
+        if (deleteButton != null) {
+            deleteButton.setEnabled(!actionInProgress);
+        }
+    }
+
     private int topControlMargin() {
         int statusBarHeight = 0;
         int resourceId = getResources().getIdentifier("status_bar_height", "dimen", "android");
@@ -749,9 +1109,21 @@ public final class RemoteMediaViewerActivity extends Activity {
         return Math.max(dp(40), statusBarHeight + dp(12));
     }
 
+    private int bottomControlMargin() {
+        int navigationBarHeight = 0;
+        int resourceId = getResources().getIdentifier("navigation_bar_height", "dimen", "android");
+        if (resourceId > 0) {
+            navigationBarHeight = getResources().getDimensionPixelSize(resourceId);
+        }
+        return Math.max(dp(24), navigationBarHeight + dp(10));
+    }
+
     private void bringOverlayControlsToFront() {
         if (backButton != null) {
             backButton.bringToFront();
+        }
+        if (actionBar != null) {
+            actionBar.bringToFront();
         }
         if (progress != null) {
             progress.bringToFront();
@@ -759,6 +1131,14 @@ public final class RemoteMediaViewerActivity extends Activity {
         if (status != null) {
             status.bringToFront();
         }
+    }
+
+    private int bottomStatusMargin() {
+        return actionBar != null ? bottomControlMargin() + dp(64) : dp(36);
+    }
+
+    private int videoControllerBottomMargin() {
+        return actionBar != null ? bottomControlMargin() + dp(72) : dp(56);
     }
 
     private boolean canNavigateBySwipe() {

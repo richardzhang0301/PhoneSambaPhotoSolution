@@ -7,6 +7,7 @@ final class RemotePhotoItem {
     final long size;
     final long lastModifiedMillis;
     final boolean video;
+    boolean selected;
 
     RemotePhotoItem(String name, String url, String thumbnailUrl, long size, long lastModifiedMillis, boolean video) {
         this.name = name;

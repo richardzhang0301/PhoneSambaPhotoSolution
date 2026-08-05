@@ -4,16 +4,22 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DatePickerDialog;
+import android.app.PendingIntent;
+import android.app.RecoverableSecurityException;
 import android.content.Context;
-import android.content.SharedPreferences;
+import android.content.Intent;
+import android.content.IntentSender;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.view.DisplayCutout;
@@ -23,7 +29,6 @@ import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.GridView;
@@ -33,6 +38,7 @@ import android.widget.ProgressBar;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -43,11 +49,12 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import jcifs.CIFSContext;
+import jcifs.smb.SmbFile;
+
 public final class MainActivity extends Activity {
     private static final int REQUEST_IMAGES = 1001;
-    private static final String PREFS = "main_ui_state";
-    private static final String PREF_SHOW_PHONE = "show_phone_media";
-    private static final String PREF_SHOW_GOOGLE_DRIVE = "show_google_drive_media";
+    private static final int REQUEST_DELETE_SELECTED = 1002;
 
     private enum Tab {
         LOCAL,
@@ -61,6 +68,7 @@ public final class MainActivity extends Activity {
     private final List<PhotoItem> allPhotos = new ArrayList<>();
     private final List<PhotoItem> photos = new ArrayList<>();
     private final List<RemotePhotoItem> remotePhotos = new ArrayList<>();
+    private final List<PhotoItem> pendingDeleteItems = new ArrayList<>();
 
     private ThumbLoader thumbLoader;
     private RemoteThumbLoader remoteThumbLoader;
@@ -69,24 +77,24 @@ public final class MainActivity extends Activity {
     private GridView localGrid;
     private GridView remoteGrid;
     private LinearLayout buttonRow;
-    private LinearLayout localFilterRow;
+    private LinearLayout localActionRow;
     private TextView status;
     private TextView destination;
     private ProgressBar progress;
     private Button localTabButton;
     private Button remoteTabButton;
     private Button syncAllButton;
+    private Button deleteSyncedButton;
     private Button uploadSelectedButton;
+    private Button deleteSelectedButton;
     private Button cancelSelectionButton;
-    private CheckBox phoneFilterCheckBox;
-    private CheckBox googleDriveFilterCheckBox;
     private Tab selectedTab = Tab.LOCAL;
     private boolean uploading;
+    private boolean deleting;
+    private boolean retryDeleteAfterPermission;
     private boolean localLoaded;
     private boolean remoteLoaded;
     private boolean selectionMode;
-    private boolean showPhoneMedia = true;
-    private boolean showGoogleDriveMedia = false;
     private String localLoadedIdentity = "";
     private String remoteLoadedIdentity = "";
 
@@ -95,7 +103,6 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         thumbLoader = new ThumbLoader(this);
         remoteThumbLoader = new RemoteThumbLoader(this);
-        loadLocalFilterSettings();
         setContentView(createContentView());
 
         adapter = new PhotoGridAdapter(this, photos, thumbLoader);
@@ -118,11 +125,37 @@ public final class MainActivity extends Activity {
         remoteGrid.setAdapter(remoteAdapter);
         remoteGrid.setOnItemClickListener((parent, view, position, id) -> {
             RemotePhotoItem item = remotePhotos.get(position);
-            setStatus(item.name + "  " + sizeLabel(item.size));
-            RemoteMediaViewerActivity.openRemote(this, remotePhotos, position);
+            if (selectionMode) {
+                toggleRemoteSelection(item);
+            } else {
+                setStatus(item.name + "  " + sizeLabel(item.size));
+                RemoteMediaViewerActivity.openRemote(this, remotePhotos, position);
+            }
+        });
+        remoteGrid.setOnItemLongClickListener((parent, view, position, id) -> {
+            enterRemoteSelectionMode(remotePhotos.get(position));
+            return true;
         });
 
         selectTab(Tab.LOCAL);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (!RemoteMediaViewerActivity.consumeMediaChanged()) {
+            return;
+        }
+        remoteLoaded = false;
+        if (remoteThumbLoader != null) {
+            remoteThumbLoader.clear();
+        }
+        if (selectedTab == Tab.REMOTE) {
+            loadRemotePhotos();
+        } else {
+            localLoaded = false;
+            loadPhotos();
+        }
     }
 
     @Override
@@ -147,6 +180,24 @@ public final class MainActivity extends Activity {
         } else if (selectedTab == Tab.LOCAL) {
             setStatus("Media permission is needed to show the gallery");
         }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_DELETE_SELECTED) {
+            return;
+        }
+        if (resultCode != RESULT_OK) {
+            finishDeleteSelected(false, 0, "Delete cancelled");
+            return;
+        }
+        if (retryDeleteAfterPermission) {
+            retryDeleteAfterPermission = false;
+            deleteSelectedDirect(new ArrayList<>(pendingDeleteItems));
+            return;
+        }
+        finishDeleteSelected(true, pendingDeleteItems.size(), "Deleted " + pendingDeleteItems.size());
     }
 
     private View createContentView() {
@@ -208,24 +259,19 @@ public final class MainActivity extends Activity {
         destinationRow.addView(destination, new LinearLayout.LayoutParams(0, dp(32), 1));
         actions.addView(destinationRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32)));
 
-        localFilterRow = new LinearLayout(this);
-        localFilterRow.setGravity(Gravity.CENTER_VERTICAL);
+        localActionRow = new LinearLayout(this);
+        localActionRow.setGravity(Gravity.CENTER_VERTICAL);
 
         syncAllButton = primaryButton("Sync", R.drawable.ic_sync);
         syncAllButton.setOnClickListener(v -> syncAll());
         LinearLayout.LayoutParams syncParams = new LinearLayout.LayoutParams(0, dp(44), 1);
         syncParams.setMargins(0, 0, dp(8), 0);
-        localFilterRow.addView(syncAllButton, syncParams);
+        localActionRow.addView(syncAllButton, syncParams);
 
-        phoneFilterCheckBox = filterCheckBox("Phone", showPhoneMedia);
-        googleDriveFilterCheckBox = filterCheckBox("Google Drive", showGoogleDriveMedia);
-        phoneFilterCheckBox.setOnCheckedChangeListener((buttonView, isChecked) -> onLocalFilterChanged());
-        googleDriveFilterCheckBox.setOnCheckedChangeListener((buttonView, isChecked) -> onLocalFilterChanged());
-        LinearLayout.LayoutParams phoneFilterParams = new LinearLayout.LayoutParams(0, dp(44), 1);
-        phoneFilterParams.setMargins(0, 0, dp(8), 0);
-        localFilterRow.addView(phoneFilterCheckBox, phoneFilterParams);
-        localFilterRow.addView(googleDriveFilterCheckBox, new LinearLayout.LayoutParams(0, dp(44), 1));
-        actions.addView(localFilterRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+        deleteSyncedButton = destructiveButton("Delete all synced");
+        deleteSyncedButton.setOnClickListener(v -> confirmDeleteSynced());
+        localActionRow.addView(deleteSyncedButton, new LinearLayout.LayoutParams(0, dp(44), 2));
+        actions.addView(localActionRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
 
         buttonRow = new LinearLayout(this);
         buttonRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -235,6 +281,12 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams uploadParams = new LinearLayout.LayoutParams(0, dp(44), 1);
         uploadParams.setMargins(0, 0, dp(8), 0);
         buttonRow.addView(uploadSelectedButton, uploadParams);
+
+        deleteSelectedButton = destructiveButton("Delete");
+        deleteSelectedButton.setOnClickListener(v -> confirmDeleteSelected());
+        LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+        deleteParams.setMargins(0, 0, dp(8), 0);
+        buttonRow.addView(deleteSelectedButton, deleteParams);
 
         cancelSelectionButton = secondaryButton("Done", R.drawable.ic_close);
         cancelSelectionButton.setOnClickListener(v -> exitSelectionMode());
@@ -324,11 +376,19 @@ public final class MainActivity extends Activity {
     }
 
     private void selectTab(Tab tab) {
-        selectedTab = tab;
-        if (tab != Tab.LOCAL && selectionMode) {
+        boolean changedTabs = tab != selectedTab;
+        if (changedTabs && selectionMode) {
             selectionMode = false;
             clearLocalSelection();
+            clearRemoteSelection();
+            if (adapter != null) {
+                adapter.notifyDataSetChanged();
+            }
+            if (remoteAdapter != null) {
+                remoteAdapter.notifyDataSetChanged();
+            }
         }
+        selectedTab = tab;
         if (localGrid != null) {
             localGrid.setVisibility(tab == Tab.LOCAL ? View.VISIBLE : View.GONE);
         }
@@ -368,6 +428,9 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshCurrentTab() {
+        if (selectionMode) {
+            exitSelectionMode();
+        }
         if (selectedTab == Tab.REMOTE) {
             remoteLoaded = false;
             remoteThumbLoader.clear();
@@ -410,50 +473,10 @@ public final class MainActivity extends Activity {
 
     private void applyLocalFilters() {
         photos.clear();
-        for (PhotoItem item : allPhotos) {
-            if (shouldShowLocalItem(item)) {
-                photos.add(item);
-            }
-        }
+        photos.addAll(allPhotos);
         if (adapter != null) {
             adapter.notifyDataSetChanged();
         }
-    }
-
-    private boolean shouldShowLocalItem(PhotoItem item) {
-        return item.googleDrive ? showGoogleDriveMedia : showPhoneMedia;
-    }
-
-    private void onLocalFilterChanged() {
-        boolean nextShowPhoneMedia = phoneFilterCheckBox == null || phoneFilterCheckBox.isChecked();
-        boolean nextShowGoogleDriveMedia = googleDriveFilterCheckBox == null || googleDriveFilterCheckBox.isChecked();
-        if (nextShowPhoneMedia == showPhoneMedia && nextShowGoogleDriveMedia == showGoogleDriveMedia) {
-            return;
-        }
-        showPhoneMedia = nextShowPhoneMedia;
-        showGoogleDriveMedia = nextShowGoogleDriveMedia;
-        saveLocalFilterSettings();
-        selectionMode = false;
-        clearLocalSelection();
-        applyLocalFilters();
-        updateButtons();
-        if (selectedTab == Tab.LOCAL) {
-            setStatus(localMediaStatus(photos.size()));
-        }
-    }
-
-    private void loadLocalFilterSettings() {
-        SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        showPhoneMedia = prefs.getBoolean(PREF_SHOW_PHONE, true);
-        showGoogleDriveMedia = prefs.getBoolean(PREF_SHOW_GOOGLE_DRIVE, false);
-    }
-
-    private void saveLocalFilterSettings() {
-        getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .edit()
-                .putBoolean(PREF_SHOW_PHONE, showPhoneMedia)
-                .putBoolean(PREF_SHOW_GOOGLE_DRIVE, showGoogleDriveMedia)
-                .apply();
     }
 
     private void loadRemotePhotos() {
@@ -463,6 +486,8 @@ public final class MainActivity extends Activity {
             remoteAdapter.setSettings(settings);
         }
         if (!settings.isConfigured()) {
+            selectionMode = false;
+            clearRemoteSelection();
             remotePhotos.clear();
             remoteLoaded = false;
             clearSambaExists();
@@ -476,6 +501,12 @@ public final class MainActivity extends Activity {
             return;
         }
 
+        selectionMode = false;
+        clearRemoteSelection();
+        if (remoteAdapter != null) {
+            remoteAdapter.notifyDataSetChanged();
+        }
+        updateButtons();
         setStatus("Scanning Samba folder");
         remoteExecutor.execute(() -> {
             try {
@@ -803,7 +834,7 @@ public final class MainActivity extends Activity {
     }
 
     private void uploadSelected() {
-        if (!selectionMode) {
+        if (selectedTab != Tab.LOCAL || !selectionMode || deleting) {
             return;
         }
         SambaSettings settings = SambaSettings.load(this);
@@ -811,12 +842,7 @@ public final class MainActivity extends Activity {
             showSettingsDialog();
             return;
         }
-        List<PhotoItem> selected = new ArrayList<>();
-        for (PhotoItem photo : photos) {
-            if (photo.selected) {
-                selected.add(photo);
-            }
-        }
+        List<PhotoItem> selected = selectedLocalItems();
         if (selected.isEmpty()) {
             setStatus("Select media to upload");
             return;
@@ -824,8 +850,295 @@ public final class MainActivity extends Activity {
         startUpload(settings, selected);
     }
 
+    private void confirmDeleteSelected() {
+        if (!selectionMode || uploading || deleting) {
+            return;
+        }
+        if (selectedTab == Tab.REMOTE) {
+            confirmDeleteRemoteSelected();
+            return;
+        }
+        List<PhotoItem> selected = selectedLocalItems();
+        if (selected.isEmpty()) {
+            setStatus("Select media to delete");
+            return;
+        }
+
+        String countLabel = selected.size() == 1 ? "1 selected item" : selected.size() + " selected items";
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Delete selected?")
+                .setMessage("Delete " + countLabel + " from this phone? This cannot be undone.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Delete", (d, which) -> deleteSelected(selected))
+                .create();
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(Color.rgb(190, 34, 34)));
+        dialog.show();
+    }
+
+    private List<PhotoItem> selectedLocalItems() {
+        List<PhotoItem> selected = new ArrayList<>();
+        for (PhotoItem photo : photos) {
+            if (photo.selected) {
+                selected.add(photo);
+            }
+        }
+        return selected;
+    }
+
+    private void confirmDeleteSynced() {
+        if (uploading || deleting) {
+            return;
+        }
+        List<PhotoItem> synced = syncedLocalItems();
+        if (synced.isEmpty()) {
+            setStatus("No synced media to delete");
+            return;
+        }
+
+        String countLabel = synced.size() == 1 ? "1 synced item" : synced.size() + " synced items";
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Delete synced media?")
+                .setMessage("Delete " + countLabel + " from this phone? They will remain in Samba. This cannot be undone.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Delete", (d, which) -> deleteSelected(synced))
+                .create();
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(Color.rgb(190, 34, 34)));
+        dialog.show();
+    }
+
+    private List<PhotoItem> syncedLocalItems() {
+        List<PhotoItem> synced = new ArrayList<>();
+        for (PhotoItem photo : photos) {
+            if (photo.sambaExists) {
+                synced.add(photo);
+            }
+        }
+        return synced;
+    }
+
+    private void confirmDeleteRemoteSelected() {
+        List<RemotePhotoItem> selected = selectedRemoteItems();
+        if (selected.isEmpty()) {
+            setStatus("Select Samba media to delete");
+            return;
+        }
+
+        String countLabel = selected.size() == 1 ? "1 selected item" : selected.size() + " selected items";
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Delete from Samba?")
+                .setMessage("Delete " + countLabel + " from Samba? This cannot be undone.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Delete", (d, which) -> deleteRemoteSelected(selected))
+                .create();
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(Color.rgb(190, 34, 34)));
+        dialog.show();
+    }
+
+    private List<RemotePhotoItem> selectedRemoteItems() {
+        List<RemotePhotoItem> selected = new ArrayList<>();
+        for (RemotePhotoItem photo : remotePhotos) {
+            if (photo.selected) {
+                selected.add(photo);
+            }
+        }
+        return selected;
+    }
+
+    private void deleteSelected(List<PhotoItem> selected) {
+        if (selected.isEmpty()) {
+            setStatus("Select media to delete");
+            return;
+        }
+        deleting = true;
+        retryDeleteAfterPermission = false;
+        pendingDeleteItems.clear();
+        pendingDeleteItems.addAll(selected);
+        progress.setIndeterminate(false);
+        progress.setMax(Math.max(1, selected.size()));
+        progress.setProgress(0);
+        progress.setVisibility(View.VISIBLE);
+        setStatus("Deleting " + selected.size());
+        updateButtons();
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            requestDeleteSelectedPermission(selected);
+        } else {
+            deleteSelectedDirect(new ArrayList<>(selected));
+        }
+    }
+
+    private void requestDeleteSelectedPermission(List<PhotoItem> selected) {
+        ArrayList<Uri> uris = new ArrayList<>();
+        for (PhotoItem item : selected) {
+            uris.add(item.uri);
+        }
+        try {
+            PendingIntent deleteRequest = MediaStore.createDeleteRequest(getContentResolver(), uris);
+            startIntentSenderForResult(deleteRequest.getIntentSender(), REQUEST_DELETE_SELECTED, null, 0, 0, 0);
+        } catch (IntentSender.SendIntentException | RuntimeException exc) {
+            finishDeleteSelected(false, 0, "Delete not allowed");
+        }
+    }
+
+    private void deleteSelectedDirect(List<PhotoItem> selected) {
+        uploadExecutor.execute(() -> {
+            int deleted = 0;
+            for (int index = 0; index < selected.size(); index++) {
+                PhotoItem item = selected.get(index);
+                try {
+                    if (getContentResolver().delete(item.uri, null, null) > 0) {
+                        deleted++;
+                    }
+                    int done = index + 1;
+                    main.post(() -> {
+                        progress.setProgress(done);
+                        setStatus("Deleting " + done + " of " + selected.size());
+                    });
+                } catch (SecurityException exc) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && exc instanceof RecoverableSecurityException) {
+                        List<PhotoItem> remaining = new ArrayList<>();
+                        for (int pendingIndex = index; pendingIndex < selected.size(); pendingIndex++) {
+                            remaining.add(selected.get(pendingIndex));
+                        }
+                        int deletedSoFar = deleted;
+                        main.post(() -> requestRecoverableDeletePermission((RecoverableSecurityException) exc, remaining, deletedSoFar));
+                        return;
+                    }
+                }
+            }
+            int deletedTotal = deleted;
+            main.post(() -> finishDeleteSelected(deletedTotal > 0, deletedTotal, deletedTotal == 0 ? "Delete failed" : "Deleted " + deletedTotal));
+        });
+    }
+
+    private void deleteRemoteSelected(List<RemotePhotoItem> selected) {
+        if (selected.isEmpty()) {
+            setStatus("Select Samba media to delete");
+            return;
+        }
+        SambaSettings settings = SambaSettings.load(this);
+        if (!settings.isConfigured()) {
+            showSettingsDialog();
+            return;
+        }
+
+        deleting = true;
+        progress.setIndeterminate(false);
+        progress.setMax(Math.max(1, selected.size()));
+        progress.setProgress(0);
+        progress.setVisibility(View.VISIBLE);
+        setStatus("Deleting " + selected.size() + " from Samba");
+        updateButtons();
+
+        remoteExecutor.execute(() -> {
+            int deleted = 0;
+            int failed = 0;
+            try {
+                CIFSContext context = SambaUploader.createContext(settings);
+                int total = selected.size();
+                for (int index = 0; index < total; index++) {
+                    RemotePhotoItem item = selected.get(index);
+                    try {
+                        SmbFile file = new SmbFile(item.url, context);
+                        if (file.exists()) {
+                            file.delete();
+                        }
+                        deleteRemoteThumbnail(context, item);
+                        deleted++;
+                    } catch (Exception ignored) {
+                        failed++;
+                    }
+                    int done = index + 1;
+                    main.post(() -> {
+                        progress.setProgress(done);
+                        setStatus("Deleting " + done + " of " + total + " from Samba");
+                    });
+                }
+            } catch (Exception ignored) {
+                failed = selected.size() - deleted;
+            }
+            int deletedTotal = deleted;
+            int failedTotal = failed;
+            main.post(() -> finishRemoteDelete(deletedTotal, failedTotal));
+        });
+    }
+
+    private void deleteRemoteThumbnail(CIFSContext context, RemotePhotoItem item) {
+        if (TextUtils.isEmpty(item.thumbnailUrl)) {
+            return;
+        }
+        try {
+            SmbFile thumbnail = new SmbFile(item.thumbnailUrl, context);
+            if (thumbnail.exists()) {
+                thumbnail.delete();
+            }
+        } catch (Exception ignored) {
+            // The media file is authoritative; stale thumbnail cleanup is best effort.
+        }
+    }
+
+    private void finishRemoteDelete(int deletedCount, int failedCount) {
+        deleting = false;
+        progress.setIndeterminate(false);
+        progress.setVisibility(View.GONE);
+        selectionMode = false;
+        clearRemoteSelection();
+        if (remoteAdapter != null) {
+            remoteAdapter.notifyDataSetChanged();
+        }
+        updateButtons();
+
+        if (deletedCount > 0) {
+            remoteLoaded = false;
+            if (remoteThumbLoader != null) {
+                remoteThumbLoader.clear();
+            }
+            String message = failedCount > 0
+                    ? "Deleted " + deletedCount + "  Failed " + failedCount
+                    : "Deleted " + deletedCount;
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+            setStatus(message);
+            loadRemotePhotos();
+        } else {
+            setStatus(failedCount > 0 ? "Delete failed" : "Nothing deleted");
+        }
+    }
+
+    private void requestRecoverableDeletePermission(RecoverableSecurityException exc, List<PhotoItem> remaining, int deletedSoFar) {
+        pendingDeleteItems.clear();
+        pendingDeleteItems.addAll(remaining);
+        retryDeleteAfterPermission = true;
+        if (deletedSoFar > 0) {
+            setStatus("Deleted " + deletedSoFar + "; waiting for permission");
+        }
+        try {
+            PendingIntent actionIntent = exc.getUserAction().getActionIntent();
+            startIntentSenderForResult(actionIntent.getIntentSender(), REQUEST_DELETE_SELECTED, null, 0, 0, 0);
+        } catch (IntentSender.SendIntentException | RuntimeException sendExc) {
+            finishDeleteSelected(deletedSoFar > 0, deletedSoFar, deletedSoFar > 0 ? "Deleted " + deletedSoFar : "Delete not allowed");
+        }
+    }
+
+    private void finishDeleteSelected(boolean changed, int deletedCount, String message) {
+        deleting = false;
+        retryDeleteAfterPermission = false;
+        pendingDeleteItems.clear();
+        progress.setIndeterminate(false);
+        progress.setVisibility(View.GONE);
+        if (changed) {
+            selectionMode = false;
+            clearLocalSelection();
+            localLoaded = false;
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+            loadPhotos();
+        } else {
+            updateButtons();
+            setStatus(message);
+        }
+    }
+
     private void startUpload(SambaSettings settings, List<PhotoItem> items) {
-        if (uploading) {
+        if (uploading || deleting) {
             return;
         }
         uploading = true;
@@ -957,7 +1270,7 @@ public final class MainActivity extends Activity {
     }
 
     private void enterSelectionMode(PhotoItem item) {
-        if (uploading) {
+        if (uploading || deleting) {
             return;
         }
         selectionMode = true;
@@ -967,8 +1280,19 @@ public final class MainActivity extends Activity {
         updateSelectionStatus();
     }
 
+    private void enterRemoteSelectionMode(RemotePhotoItem item) {
+        if (uploading || deleting) {
+            return;
+        }
+        selectionMode = true;
+        item.selected = true;
+        remoteAdapter.notifyDataSetChanged();
+        updateButtons();
+        updateSelectionStatus();
+    }
+
     private void toggleLocalSelection(PhotoItem item) {
-        if (!selectionMode || uploading) {
+        if (!selectionMode || uploading || deleting) {
             return;
         }
         item.selected = !item.selected;
@@ -977,23 +1301,45 @@ public final class MainActivity extends Activity {
         updateSelectionStatus();
     }
 
+    private void toggleRemoteSelection(RemotePhotoItem item) {
+        if (!selectionMode || uploading || deleting) {
+            return;
+        }
+        item.selected = !item.selected;
+        remoteAdapter.notifyDataSetChanged();
+        updateButtons();
+        updateSelectionStatus();
+    }
+
     private void exitSelectionMode() {
-        if (!selectionMode || uploading) {
+        if (!selectionMode || uploading || deleting) {
             return;
         }
         selectionMode = false;
         clearLocalSelection();
+        clearRemoteSelection();
         if (adapter != null) {
             adapter.notifyDataSetChanged();
+        }
+        if (remoteAdapter != null) {
+            remoteAdapter.notifyDataSetChanged();
         }
         updateButtons();
         if (selectedTab == Tab.LOCAL) {
             setStatus(localMediaStatus(photos.size()));
+        } else {
+            setStatus(remotePhotos.isEmpty() ? "No remote media found" : remotePhotos.size() + " remote media files");
         }
     }
 
     private void clearLocalSelection() {
         for (PhotoItem item : allPhotos) {
+            item.selected = false;
+        }
+    }
+
+    private void clearRemoteSelection() {
+        for (RemotePhotoItem item : remotePhotos) {
             item.selected = false;
         }
     }
@@ -1008,19 +1354,37 @@ public final class MainActivity extends Activity {
         return selected;
     }
 
+    private int selectedRemoteCount() {
+        int selected = 0;
+        for (RemotePhotoItem item : remotePhotos) {
+            if (item.selected) {
+                selected++;
+            }
+        }
+        return selected;
+    }
+
+    private int syncedLocalCount() {
+        int synced = 0;
+        for (PhotoItem item : photos) {
+            if (item.sambaExists) {
+                synced++;
+            }
+        }
+        return synced;
+    }
+
+    private int selectedCurrentCount() {
+        return selectedTab == Tab.REMOTE ? selectedRemoteCount() : selectedLocalCount();
+    }
+
     private void updateSelectionStatus() {
-        int selected = selectedLocalCount();
+        int selected = selectedCurrentCount();
         setStatus(selected == 1 ? "1 selected" : selected + " selected");
     }
 
     private String localMediaStatus(int count) {
-        if (allPhotos.isEmpty()) {
-            return "No media found";
-        }
-        if (!showPhoneMedia && !showGoogleDriveMedia) {
-            return "All local sources hidden";
-        }
-        return count == 0 ? "No media shown" : count + " media files";
+        return count == 0 ? "No camera media found" : count + " camera media files";
     }
 
     private void updateButtons() {
@@ -1030,28 +1394,29 @@ public final class MainActivity extends Activity {
         }
 
         boolean localVisible = selectedTab == Tab.LOCAL;
-        boolean selecting = selectionMode && localVisible;
-        if (localFilterRow != null) {
-            localFilterRow.setVisibility(localVisible && !selecting ? View.VISIBLE : View.GONE);
+        boolean remoteVisible = selectedTab == Tab.REMOTE;
+        boolean selecting = selectionMode && (localVisible || remoteVisible);
+        if (localActionRow != null) {
+            localActionRow.setVisibility(localVisible && !selecting ? View.VISIBLE : View.GONE);
         }
         if (buttonRow != null) {
             buttonRow.setVisibility(selecting ? View.VISIBLE : View.GONE);
         }
-        if (syncAllButton == null || uploadSelectedButton == null || cancelSelectionButton == null) {
+        if (syncAllButton == null || deleteSyncedButton == null || uploadSelectedButton == null || deleteSelectedButton == null || cancelSelectionButton == null) {
             return;
         }
 
-        int selected = selectedLocalCount();
-        syncAllButton.setEnabled(localVisible && !uploading && !photos.isEmpty());
-        if (phoneFilterCheckBox != null) {
-            phoneFilterCheckBox.setEnabled(localVisible && !selecting && !uploading);
-        }
-        if (googleDriveFilterCheckBox != null) {
-            googleDriveFilterCheckBox.setEnabled(localVisible && !selecting && !uploading);
-        }
-        uploadSelectedButton.setEnabled(localVisible && selectionMode && !uploading && selected > 0);
-        uploadSelectedButton.setText(selected > 0 ? "Upload " + selected : "Upload selected");
-        cancelSelectionButton.setEnabled(localVisible && selectionMode && !uploading);
+        int selected = selectedCurrentCount();
+        int selectedLocal = selectedLocalCount();
+        boolean busy = uploading || deleting;
+        syncAllButton.setEnabled(localVisible && !busy && !photos.isEmpty());
+        int synced = syncedLocalCount();
+        deleteSyncedButton.setEnabled(localVisible && !busy && synced > 0);
+        uploadSelectedButton.setVisibility(localVisible && selecting ? View.VISIBLE : View.GONE);
+        uploadSelectedButton.setEnabled(localVisible && selecting && !busy && selectedLocal > 0);
+        uploadSelectedButton.setText(selectedLocal > 0 ? "Upload " + selectedLocal : "Upload selected");
+        deleteSelectedButton.setEnabled(selecting && !busy && selected > 0);
+        cancelSelectionButton.setEnabled(selecting && !busy);
     }
 
     private void updateTabButton(Button button, boolean selected) {
@@ -1103,6 +1468,23 @@ public final class MainActivity extends Activity {
         return button;
     }
 
+    private Button destructiveButton(String text) {
+        Button button = new Button(this);
+        button.setAllCaps(false);
+        button.setText(text);
+        button.setTextSize(14);
+        button.setTextColor(Color.WHITE);
+        button.setGravity(Gravity.CENTER);
+        button.setMinHeight(0);
+        button.setMinWidth(0);
+        button.setPadding(dp(10), 0, dp(10), 0);
+        GradientDrawable background = new GradientDrawable();
+        background.setCornerRadius(dp(7));
+        background.setColor(Color.rgb(190, 34, 34));
+        button.setBackground(background);
+        return button;
+    }
+
     private Button baseButton(String text, int icon) {
         Button button = new Button(this);
         button.setAllCaps(false);
@@ -1131,19 +1513,6 @@ public final class MainActivity extends Activity {
         return button;
     }
 
-    private CheckBox filterCheckBox(String text, boolean checked) {
-        CheckBox checkBox = new CheckBox(this);
-        checkBox.setAllCaps(false);
-        checkBox.setText(text);
-        checkBox.setTextSize(13);
-        checkBox.setTextColor(getColorCompat(R.color.ink));
-        checkBox.setGravity(Gravity.CENTER_VERTICAL);
-        checkBox.setMinHeight(0);
-        checkBox.setMinWidth(0);
-        checkBox.setPadding(0, 0, dp(8), 0);
-        checkBox.setChecked(checked);
-        return checkBox;
-    }
 
     private ImageButton iconButton(int icon, String description) {
         ImageButton button = new ImageButton(this);

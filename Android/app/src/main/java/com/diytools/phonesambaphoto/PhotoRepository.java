@@ -62,7 +62,7 @@ final class PhotoRepository {
                     MediaStore.Images.Media.DATE_MODIFIED,
                     MediaStore.Images.Media.DATE_ADDED,
                     MediaStore.Images.Media.DATE_TAKEN,
-                    MediaStore.MediaColumns.OWNER_PACKAGE_NAME
+                    MediaStore.MediaColumns.RELATIVE_PATH
             };
         } else {
             projection = new String[]{
@@ -71,7 +71,8 @@ final class PhotoRepository {
                     MediaStore.Images.Media.SIZE,
                     MediaStore.Images.Media.DATE_MODIFIED,
                     MediaStore.Images.Media.DATE_ADDED,
-                    MediaStore.Images.Media.DATE_TAKEN
+                    MediaStore.Images.Media.DATE_TAKEN,
+                    MediaStore.MediaColumns.DATA
             };
         }
         String sortOrder = MediaStore.Images.Media.DATE_ADDED + " DESC";
@@ -85,21 +86,26 @@ final class PhotoRepository {
             int modifiedColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_MODIFIED);
             int addedColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED);
             int takenColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN);
-            int ownerColumn = cursor.getColumnIndex(MediaStore.MediaColumns.OWNER_PACKAGE_NAME);
+            int pathColumn = cursor.getColumnIndex(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                    ? MediaStore.MediaColumns.RELATIVE_PATH
+                    : MediaStore.MediaColumns.DATA);
             while (cursor.moveToNext()) {
+                String path = pathColumn >= 0 ? cursor.getString(pathColumn) : "";
+                if (!isCameraPath(path)) {
+                    continue;
+                }
                 long id = cursor.getLong(idColumn);
                 String name = cursor.getString(nameColumn);
                 long size = cursor.getLong(sizeColumn);
                 long modified = cursor.getLong(modifiedColumn);
                 long added = cursor.getLong(addedColumn);
                 long taken = cursor.getLong(takenColumn);
-                String ownerPackage = ownerColumn >= 0 ? cursor.getString(ownerColumn) : "";
                 Uri uri = ContentUris.withAppendedId(collection, id);
                 if (TextUtils.isEmpty(name)) {
                     name = "photo_" + id + ".jpg";
                 }
                 long displayTime = taken > 0L ? taken : added * 1000L;
-                PhotoItem item = new PhotoItem(id, uri, name, size, modified, displayTime, false, false, isGoogleDriveOwner(ownerPackage));
+                PhotoItem item = new PhotoItem(id, uri, name, size, modified, displayTime, false, false);
                 item.uploaded = settings.isConfigured() && uploadedKeys.contains(uploadKey(settings, item));
                 media.add(item);
             }
@@ -118,7 +124,7 @@ final class PhotoRepository {
                     MediaStore.Video.Media.SIZE,
                     MediaStore.Video.Media.DATE_MODIFIED,
                     MediaStore.Video.Media.DATE_ADDED,
-                    MediaStore.MediaColumns.OWNER_PACKAGE_NAME
+                    MediaStore.MediaColumns.RELATIVE_PATH
             };
         } else {
             projection = new String[]{
@@ -126,7 +132,8 @@ final class PhotoRepository {
                     MediaStore.Video.Media.DISPLAY_NAME,
                     MediaStore.Video.Media.SIZE,
                     MediaStore.Video.Media.DATE_MODIFIED,
-                    MediaStore.Video.Media.DATE_ADDED
+                    MediaStore.Video.Media.DATE_ADDED,
+                    MediaStore.MediaColumns.DATA
             };
         }
         String sortOrder = MediaStore.Video.Media.DATE_ADDED + " DESC";
@@ -139,19 +146,24 @@ final class PhotoRepository {
             int sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE);
             int modifiedColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_MODIFIED);
             int addedColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_ADDED);
-            int ownerColumn = cursor.getColumnIndex(MediaStore.MediaColumns.OWNER_PACKAGE_NAME);
+            int pathColumn = cursor.getColumnIndex(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                    ? MediaStore.MediaColumns.RELATIVE_PATH
+                    : MediaStore.MediaColumns.DATA);
             while (cursor.moveToNext()) {
+                String path = pathColumn >= 0 ? cursor.getString(pathColumn) : "";
+                if (!isCameraPath(path)) {
+                    continue;
+                }
                 long id = cursor.getLong(idColumn);
                 String name = cursor.getString(nameColumn);
                 long size = cursor.getLong(sizeColumn);
                 long modified = cursor.getLong(modifiedColumn);
                 long added = cursor.getLong(addedColumn);
-                String ownerPackage = ownerColumn >= 0 ? cursor.getString(ownerColumn) : "";
                 Uri uri = ContentUris.withAppendedId(collection, id);
                 if (TextUtils.isEmpty(name)) {
                     name = "video_" + id + ".mp4";
                 }
-                PhotoItem item = new PhotoItem(id, uri, name, size, modified, added * 1000L, false, true, isGoogleDriveOwner(ownerPackage));
+                PhotoItem item = new PhotoItem(id, uri, name, size, modified, added * 1000L, false, true);
                 item.uploaded = settings.isConfigured() && uploadedKeys.contains(uploadKey(settings, item));
                 media.add(item);
             }
@@ -160,14 +172,14 @@ final class PhotoRepository {
         }
     }
 
-    private static boolean isGoogleDriveOwner(String ownerPackage) {
-        if (TextUtils.isEmpty(ownerPackage)) {
+    private static boolean isCameraPath(String path) {
+        if (TextUtils.isEmpty(path)) {
             return false;
         }
-        String owner = ownerPackage.toLowerCase(Locale.US);
-        return owner.equals("com.google.android.apps.docs")
-                || owner.startsWith("com.google.android.apps.docs.")
-                || owner.contains("google.android.apps.drive");
+        String normalized = path.replace('\\', '/').toLowerCase(Locale.US);
+        return normalized.equals("dcim/camera")
+                || normalized.equals("dcim/camera/")
+                || normalized.contains("/dcim/camera/");
     }
 
     private static Set<String> loadUploadedKeys(Context context) {

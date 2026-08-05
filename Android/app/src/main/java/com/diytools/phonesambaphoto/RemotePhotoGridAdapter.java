@@ -63,6 +63,24 @@ final class RemotePhotoGridAdapter extends BaseAdapter {
                     ViewGroup.LayoutParams.MATCH_PARENT
             ));
 
+            ImageView play = new ImageView(context);
+            play.setImageResource(R.drawable.ic_play_circle);
+            FrameLayout.LayoutParams playParams = new FrameLayout.LayoutParams(dp(42), dp(42), Gravity.CENTER);
+            item.addView(play, playParams);
+
+            View overlay = new View(context);
+            overlay.setBackgroundColor(Color.argb(106, 23, 104, 172));
+            item.addView(overlay, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+            ));
+
+            ImageView check = new ImageView(context);
+            check.setImageResource(R.drawable.ic_check_circle);
+            FrameLayout.LayoutParams checkParams = new FrameLayout.LayoutParams(dp(34), dp(34), Gravity.TOP | Gravity.END);
+            checkParams.setMargins(0, dp(7), dp(7), 0);
+            item.addView(check, checkParams);
+
             TextView name = new TextView(context);
             name.setTextColor(Color.WHITE);
             name.setTextSize(11);
@@ -78,7 +96,7 @@ final class RemotePhotoGridAdapter extends BaseAdapter {
             );
             item.addView(name, nameParams);
 
-            holder = new Holder(image, name);
+            holder = new Holder(image, play, overlay, check, name);
             item.setTag(holder);
             convertView = item;
         } else {
@@ -92,6 +110,9 @@ final class RemotePhotoGridAdapter extends BaseAdapter {
         } else {
             holder.image.setImageDrawable(null);
         }
+        holder.play.setVisibility(photo.video ? View.VISIBLE : View.GONE);
+        holder.overlay.setVisibility(photo.selected ? View.VISIBLE : View.GONE);
+        holder.check.setVisibility(photo.selected ? View.VISIBLE : View.GONE);
         return convertView;
     }
 
@@ -101,10 +122,16 @@ final class RemotePhotoGridAdapter extends BaseAdapter {
 
     private static final class Holder {
         final ImageView image;
+        final ImageView play;
+        final View overlay;
+        final ImageView check;
         final TextView name;
 
-        Holder(ImageView image, TextView name) {
+        Holder(ImageView image, ImageView play, View overlay, ImageView check, TextView name) {
             this.image = image;
+            this.play = play;
+            this.overlay = overlay;
+            this.check = check;
             this.name = name;
         }
     }
