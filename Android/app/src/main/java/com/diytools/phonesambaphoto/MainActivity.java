@@ -61,6 +61,10 @@ public final class MainActivity extends Activity {
         REMOTE
     }
 
+    private interface DateRangeAction {
+        void onDateRangeSelected(long startMillis, long endMillis);
+    }
+
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService scanExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService remoteExecutor = Executors.newSingleThreadExecutor();
@@ -76,6 +80,8 @@ public final class MainActivity extends Activity {
     private RemotePhotoGridAdapter remoteAdapter;
     private GridView localGrid;
     private GridView remoteGrid;
+    private LinearLayout selectionActionRow;
+    private LinearLayout selectionRowsColumn;
     private LinearLayout buttonRow;
     private LinearLayout noSyncRow;
     private LinearLayout localActionRow;
@@ -276,6 +282,12 @@ public final class MainActivity extends Activity {
         localActionRow.addView(deleteSyncedButton, new LinearLayout.LayoutParams(0, dp(44), 1));
         actions.addView(localActionRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
 
+        selectionActionRow = new LinearLayout(this);
+        selectionActionRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        selectionRowsColumn = new LinearLayout(this);
+        selectionRowsColumn.setOrientation(LinearLayout.VERTICAL);
+
         buttonRow = new LinearLayout(this);
         buttonRow.setGravity(Gravity.CENTER_VERTICAL);
 
@@ -288,13 +300,11 @@ public final class MainActivity extends Activity {
         deleteSelectedButton = destructiveButton(t("Delete", "删除"));
         deleteSelectedButton.setOnClickListener(v -> confirmDeleteSelected());
         LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(0, dp(44), 1);
-        deleteParams.setMargins(0, 0, dp(8), 0);
         buttonRow.addView(deleteSelectedButton, deleteParams);
 
         cancelSelectionButton = secondaryButton(t("Done", "完成"), R.drawable.ic_close);
         cancelSelectionButton.setOnClickListener(v -> exitSelectionMode());
-        buttonRow.addView(cancelSelectionButton, new LinearLayout.LayoutParams(0, dp(44), 1));
-        actions.addView(buttonRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+        selectionRowsColumn.addView(buttonRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
 
         noSyncRow = new LinearLayout(this);
         noSyncRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -308,7 +318,13 @@ public final class MainActivity extends Activity {
         reEnableSyncButton = successButton(t("Re-enable Sync", "重新启用同步"));
         reEnableSyncButton.setOnClickListener(v -> reEnableSelectedSync());
         noSyncRow.addView(reEnableSyncButton, new LinearLayout.LayoutParams(0, dp(44), 1));
-        actions.addView(noSyncRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+        selectionRowsColumn.addView(noSyncRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+
+        LinearLayout.LayoutParams selectionRowsParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2);
+        selectionRowsParams.setMargins(0, 0, dp(8), 0);
+        selectionActionRow.addView(selectionRowsColumn, selectionRowsParams);
+        selectionActionRow.addView(cancelSelectionButton, new LinearLayout.LayoutParams(0, dp(92), 1));
+        actions.addView(selectionActionRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         status = new TextView(this);
         status.setTextColor(getColorCompat(R.color.muted));
@@ -652,11 +668,22 @@ public final class MainActivity extends Activity {
     }
 
     private void showSyncDateRangeDialog(SambaSettings settings) {
+        showDateRangeDialog(t("Sync date range", "同步日期范围"),
+                (startMillis, endMillis) -> syncDateRange(settings, startMillis, endMillis));
+    }
+
+    private void showDeleteSyncedDateRangeDialog() {
+        showDateRangeDialog(t("Delete synced date range", "删除已同步日期范围"),
+                this::confirmDeleteSyncedRange);
+    }
+
+    private void showDateRangeDialog(String title, DateRangeAction action) {
         final int todayId = View.generateViewId();
         final int weekId = View.generateViewId();
         final int monthId = View.generateViewId();
         final int yearId = View.generateViewId();
         final int customId = View.generateViewId();
+        final int allId = View.generateViewId();
         final Calendar[] startDate = {startOfToday()};
         final Calendar[] endDate = {endOfToday()};
         applySyncPreset(weekId, todayId, weekId, monthId, yearId, startDate, endDate);
@@ -673,6 +700,7 @@ public final class MainActivity extends Activity {
         presets.addView(rangeRadioButton(monthId, t("Past Month", "过去一个月")));
         presets.addView(rangeRadioButton(yearId, t("Past Year", "过去一年")));
         presets.addView(rangeRadioButton(customId, t("Custom Range", "自定义范围")));
+        presets.addView(rangeRadioButton(allId, t("All", "全部")));
         form.addView(presets, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout dateRow = new LinearLayout(this);
@@ -694,8 +722,9 @@ public final class MainActivity extends Activity {
         form.addView(rangeMessage, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(28)));
 
         Runnable refreshDates = () -> {
-            startButton.setText(t("Start  ", "开始  ") + formatDate(startDate[0]));
-            endButton.setText(t("End  ", "结束  ") + formatDate(endDate[0]));
+            boolean all = presets.getCheckedRadioButtonId() == allId;
+            startButton.setText(all ? t("Start  All", "开始  全部") : t("Start  ", "开始  ") + formatDate(startDate[0]));
+            endButton.setText(all ? t("End  All", "结束  全部") : t("End  ", "结束  ") + formatDate(endDate[0]));
             boolean custom = presets.getCheckedRadioButtonId() == customId;
             startButton.setEnabled(custom);
             endButton.setEnabled(custom);
@@ -713,7 +742,7 @@ public final class MainActivity extends Activity {
         });
 
         AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle(t("Sync date range", "同步日期范围"))
+                .setTitle(title)
                 .setView(form)
                 .setNegativeButton(t("Cancel", "取消"), null)
                 .setPositiveButton(t("OK", "确定"), null)
@@ -721,14 +750,15 @@ public final class MainActivity extends Activity {
         dialog.setOnShowListener(d -> {
             Button ok = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
             ok.setOnClickListener(v -> {
-                long startMillis = startDate[0].getTimeInMillis();
-                long endMillis = endDate[0].getTimeInMillis();
+                boolean all = presets.getCheckedRadioButtonId() == allId;
+                long startMillis = all ? Long.MIN_VALUE : startDate[0].getTimeInMillis();
+                long endMillis = all ? Long.MAX_VALUE : endDate[0].getTimeInMillis();
                 if (startMillis > endMillis) {
                     rangeMessage.setText(t("Start date must be before end date", "开始日期必须早于结束日期"));
                     return;
                 }
                 dialog.dismiss();
-                syncDateRange(settings, startMillis, endMillis);
+                action.onDateRangeSelected(startMillis, endMillis);
             });
         });
         dialog.show();
@@ -948,12 +978,22 @@ public final class MainActivity extends Activity {
         if (uploading || deleting) {
             return;
         }
-        List<PhotoItem> synced = syncedLocalItems();
-        if (synced.isEmpty()) {
+        if (syncedLocalItems().isEmpty()) {
             setStatus(t("No synced media to delete", "没有可删除的已同步媒体"));
             return;
         }
+        showDeleteSyncedDateRangeDialog();
+    }
 
+    private void confirmDeleteSyncedRange(long startMillis, long endMillis) {
+        if (uploading || deleting) {
+            return;
+        }
+        List<PhotoItem> synced = syncedLocalItems(startMillis, endMillis);
+        if (synced.isEmpty()) {
+            setStatus(t("No synced media to delete in date range", "该日期范围内没有可删除的已同步媒体"));
+            return;
+        }
         String countLabel = syncedItemLabel(synced.size());
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle(t("Delete synced media?", "删除已同步媒体？"))
@@ -971,6 +1011,16 @@ public final class MainActivity extends Activity {
         List<PhotoItem> synced = new ArrayList<>();
         for (PhotoItem photo : photos) {
             if (photo.sambaExists) {
+                synced.add(photo);
+            }
+        }
+        return synced;
+    }
+
+    private List<PhotoItem> syncedLocalItems(long startMillis, long endMillis) {
+        List<PhotoItem> synced = new ArrayList<>();
+        for (PhotoItem photo : photos) {
+            if (photo.sambaExists && isInDateRange(photo, startMillis, endMillis)) {
                 synced.add(photo);
             }
         }
@@ -1473,6 +1523,17 @@ public final class MainActivity extends Activity {
         if (localActionRow != null) {
             localActionRow.setVisibility(localVisible && !selecting ? View.VISIBLE : View.GONE);
         }
+        if (selectionActionRow != null) {
+            selectionActionRow.setVisibility(selecting ? View.VISIBLE : View.GONE);
+        }
+        if (selectionRowsColumn != null) {
+            LinearLayout.LayoutParams rowsParams = (LinearLayout.LayoutParams) selectionRowsColumn.getLayoutParams();
+            float targetWeight = localVisible && selecting ? 2f : 1f;
+            if (rowsParams.weight != targetWeight) {
+                rowsParams.weight = targetWeight;
+                selectionRowsColumn.setLayoutParams(rowsParams);
+            }
+        }
         if (buttonRow != null) {
             buttonRow.setVisibility(selecting ? View.VISIBLE : View.GONE);
         }
@@ -1497,6 +1558,12 @@ public final class MainActivity extends Activity {
         noSyncButton.setEnabled(localVisible && selecting && !busy && selectedLocal > 0);
         reEnableSyncButton.setVisibility(localVisible && selecting ? View.VISIBLE : View.GONE);
         reEnableSyncButton.setEnabled(localVisible && selecting && !busy && selectedNoSync > 0);
+        ViewGroup.LayoutParams doneParams = cancelSelectionButton.getLayoutParams();
+        int doneHeight = localVisible && selecting ? dp(92) : dp(44);
+        if (doneParams.height != doneHeight) {
+            doneParams.height = doneHeight;
+            cancelSelectionButton.setLayoutParams(doneParams);
+        }
         deleteSelectedButton.setEnabled(selecting && !busy && selected > 0);
         cancelSelectionButton.setEnabled(selecting && !busy);
     }
