@@ -25,6 +25,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
@@ -49,8 +50,11 @@ import android.widget.Toast;
 import android.widget.VideoView;
 
 import java.io.BufferedInputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -74,6 +78,8 @@ public final class RemoteMediaViewerActivity extends Activity {
     private static final String EXTRA_INDEX = "index";
     private static final int REQUEST_DELETE_LOCAL = 2001;
     private static final int REQUEST_DOWNLOAD_REMOTE = 2002;
+    private static final long REMOTE_VIDEO_INITIAL_BUFFER_MS = 30_000L;
+    private static final int REMOTE_VIDEO_STARTUP_RECOVERY_LIMIT = 2;
     private static final Object NAVIGATION_LOCK = new Object();
     private static final Object MEDIA_CHANGED_LOCK = new Object();
     private static ArrayList<ViewerItem> navigationSession = new ArrayList<>();
@@ -98,7 +104,7 @@ public final class RemoteMediaViewerActivity extends Activity {
     private Surface remoteVideoOutputSurface;
     private MediaPlayer remoteMediaPlayer;
     private MediaController remoteMediaController;
-    private RemoteSmbMediaDataSource remoteMediaDataSource;
+    private RemoteVideoCacheDataSource remoteMediaDataSource;
     private View videoControllerAnchor;
     private String name;
     private String url;
@@ -117,6 +123,16 @@ public final class RemoteMediaViewerActivity extends Activity {
     private boolean actionInProgress;
     private boolean retryDownloadAfterPermission;
     private int photoRotationDegrees;
+    private boolean remoteVideoPrepared;
+    private boolean remoteVideoUserPaused;
+    private boolean remoteVideoInitialBuffering;
+    private boolean remoteVideoAutoBuffering;
+    private boolean remoteVideoResumeAfterBuffering;
+    private boolean remoteVideoSeekStartPending;
+    private boolean remoteVideoStartupRecoveryPending;
+    private int remoteVideoStartupRecoveryCount;
+    private long remoteVideoLastFrameMillis;
+    private final Runnable remoteVideoStartupWatchdog = this::checkRemoteVideoStartupFrames;
 
     static void open(Context context, RemotePhotoItem item) {
         ArrayList<ViewerItem> items = new ArrayList<>();
@@ -516,6 +532,7 @@ public final class RemoteMediaViewerActivity extends Activity {
 
             @Override
             public void onSurfaceTextureUpdated(SurfaceTexture surfaceTexture) {
+                remoteVideoLastFrameMillis = SystemClock.uptimeMillis();
             }
         });
         if (remoteVideoTexture.isAvailable()) {
@@ -540,22 +557,41 @@ public final class RemoteMediaViewerActivity extends Activity {
 
     private void openRemoteVideoPlayer(Surface surface) {
         executor.execute(() -> {
-            RemoteSmbMediaDataSource dataSource = null;
+            RemoteVideoCacheDataSource dataSource = null;
             try {
                 SambaSettings settings = SambaSettings.load(this);
                 CIFSContext context = SambaUploader.createContext(settings);
                 SmbFile source = new SmbFile(url, context);
-                dataSource = new RemoteSmbMediaDataSource(source, size);
-                RemoteSmbMediaDataSource playableDataSource = dataSource;
+                dataSource = new RemoteVideoCacheDataSource(source, size, remoteVideoCacheDirectory());
+                RemoteVideoCacheDataSource playableDataSource = dataSource;
+                playableDataSource.setListener(new RemoteVideoCacheDataSource.Listener() {
+                    @Override
+                    public void onBuffering() {
+                        main.post(() -> {
+                            if (remoteMediaDataSource == playableDataSource) {
+                                pauseRemoteVideoForBuffering();
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onReady() {
+                        main.post(() -> {
+                            if (remoteMediaDataSource == playableDataSource) {
+                                resumeRemoteVideoAfterBuffering();
+                            }
+                        });
+                    }
+                });
                 main.post(() -> startRemoteVideoPlayer(surface, playableDataSource));
             } catch (Exception exc) {
                 closeRemoteDataSource(dataSource);
-            main.post(() -> showError(t("Could not open video", "无法打开视频")));
+                main.post(() -> showError(t("Could not open video", "无法打开视频")));
             }
         });
     }
 
-    private void startRemoteVideoPlayer(Surface surface, RemoteSmbMediaDataSource dataSource) {
+    private void startRemoteVideoPlayer(Surface surface, RemoteVideoCacheDataSource dataSource) {
         if (isFinishing() || remoteVideoTexture == null || remoteVideoOutputSurface != surface) {
             closeRemoteDataSource(dataSource);
             return;
@@ -573,24 +609,252 @@ public final class RemoteMediaViewerActivity extends Activity {
                 updateRemoteVideoTransform();
             });
             remoteMediaPlayer.setOnPreparedListener(player -> {
-                hideLoading();
+                remoteVideoPrepared = true;
+                remoteVideoUserPaused = false;
+                remoteVideoInitialBuffering = false;
+                remoteVideoAutoBuffering = false;
+                remoteVideoResumeAfterBuffering = false;
+                remoteVideoSeekStartPending = false;
+                remoteVideoStartupRecoveryPending = false;
+                remoteVideoStartupRecoveryCount = 0;
+                remoteVideoLastFrameMillis = 0L;
                 setupRemoteMediaController();
-                player.start();
-                if (remoteMediaController != null) {
-                    remoteMediaController.show(1500);
+                startRemotePlaybackAfterInitialBuffer(dataSource);
+            });
+            remoteMediaPlayer.setOnSeekCompleteListener(player -> {
+                if (remoteVideoSeekStartPending) {
+                    finishRemoteVideoSeekStart();
+                } else if (remoteVideoStartupRecoveryPending) {
+                    finishRemoteVideoStartupRecovery();
                 }
-                bringOverlayControlsToFront();
-                enterImmersiveMode();
             });
             remoteMediaPlayer.setOnErrorListener((player, what, extra) -> {
                 showError(t("Could not play video", "无法播放视频"));
                 return true;
+            });
+            remoteMediaPlayer.setOnInfoListener((player, what, extra) -> {
+                if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
+                    pauseRemoteVideoForBuffering();
+                } else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
+                    resumeRemoteVideoAfterBuffering();
+                }
+                return false;
             });
             remoteMediaPlayer.prepareAsync();
         } catch (Exception exc) {
             releaseRemoteVideoPlayer();
             showError(t("Could not open video", "无法打开视频"));
         }
+    }
+
+    private File remoteVideoCacheDirectory() throws IOException {
+        File directory = new File(getCacheDir(), "samba_video_stream");
+        if (!directory.exists() && !directory.mkdirs()) {
+            throw new IOException("Could not create Samba video cache");
+        }
+        return directory;
+    }
+
+    private void startRemotePlaybackAfterInitialBuffer(RemoteVideoCacheDataSource dataSource) {
+        remoteVideoInitialBuffering = true;
+        remoteVideoResumeAfterBuffering = true;
+        showLoading(remoteVideoBufferingText(dataSource.playbackBufferPercent(0L, remoteVideoDurationMillis(), REMOTE_VIDEO_INITIAL_BUFFER_MS)));
+        if (remoteMediaController != null) {
+            remoteMediaController.show(0);
+        }
+        checkInitialRemoteVideoBuffer(dataSource);
+    }
+
+    private void checkInitialRemoteVideoBuffer(RemoteVideoCacheDataSource dataSource) {
+        if (!remoteVideoInitialBuffering || remoteMediaDataSource != dataSource || remoteMediaPlayer == null || isFinishing()) {
+            return;
+        }
+        long durationMillis = remoteVideoDurationMillis();
+        if (!dataSource.hasPlaybackBuffer(0L, durationMillis, REMOTE_VIDEO_INITIAL_BUFFER_MS)) {
+            updateLoadingMessage(remoteVideoBufferingText(dataSource.playbackBufferPercent(0L, durationMillis, REMOTE_VIDEO_INITIAL_BUFFER_MS)));
+            main.postDelayed(() -> checkInitialRemoteVideoBuffer(dataSource), 300L);
+            return;
+        }
+
+        boolean shouldStart = remoteVideoResumeAfterBuffering && !remoteVideoUserPaused && !actionInProgress;
+        remoteVideoInitialBuffering = false;
+        remoteVideoResumeAfterBuffering = false;
+        if (shouldStart) {
+            startRemoteVideoFromZeroSeek();
+        } else {
+            hideLoading();
+            bringOverlayControlsToFront();
+            enterImmersiveMode();
+        }
+    }
+
+    private long remoteVideoDurationMillis() {
+        try {
+            return remoteMediaPlayer != null ? Math.max(0L, remoteMediaPlayer.getDuration()) : 0L;
+        } catch (IllegalStateException exc) {
+            return 0L;
+        }
+    }
+
+    private void startRemoteVideoFromZeroSeek() {
+        if (remoteMediaPlayer == null || isFinishing()) {
+            return;
+        }
+        remoteVideoSeekStartPending = true;
+        showLoading(t("Buffering video", "正在缓冲视频"));
+        try {
+            seekRemoteVideoTo(0);
+        } catch (IllegalStateException ignored) {
+            remoteVideoSeekStartPending = false;
+            hideLoading();
+        }
+        bringOverlayControlsToFront();
+    }
+
+    private void finishRemoteVideoSeekStart() {
+        if (!remoteVideoSeekStartPending || remoteMediaPlayer == null || isFinishing()) {
+            return;
+        }
+        remoteVideoSeekStartPending = false;
+        hideLoading();
+        if (!remoteVideoUserPaused && !actionInProgress) {
+            try {
+                remoteVideoLastFrameMillis = 0L;
+                remoteMediaPlayer.start();
+                scheduleRemoteVideoStartupWatchdog();
+                if (remoteMediaController != null) {
+                    remoteMediaController.show(1500);
+                }
+            } catch (IllegalStateException ignored) {
+                // Leave playback stopped if the player state changed while seeking.
+            }
+        }
+        bringOverlayControlsToFront();
+        enterImmersiveMode();
+    }
+
+    private void scheduleRemoteVideoStartupWatchdog() {
+        main.removeCallbacks(remoteVideoStartupWatchdog);
+        main.postDelayed(remoteVideoStartupWatchdog, 2200L);
+    }
+
+    private void checkRemoteVideoStartupFrames() {
+        if (!remoteVideoPrepared || remoteVideoInitialBuffering || remoteVideoAutoBuffering || remoteVideoStartupRecoveryPending
+                || remoteMediaPlayer == null || remoteMediaDataSource == null || isFinishing()) {
+            return;
+        }
+        int position;
+        boolean playing;
+        try {
+            position = remoteMediaPlayer.getCurrentPosition();
+            playing = remoteMediaPlayer.isPlaying();
+        } catch (IllegalStateException ignored) {
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        boolean noFreshFrames = remoteVideoLastFrameMillis <= 0L || now - remoteVideoLastFrameMillis > 1200L;
+        if (playing && position >= 900 && noFreshFrames && remoteVideoStartupRecoveryCount < REMOTE_VIDEO_STARTUP_RECOVERY_LIMIT) {
+            recoverRemoteVideoStartup();
+            return;
+        }
+        if (playing && position < 8000) {
+            main.postDelayed(remoteVideoStartupWatchdog, 1200L);
+        }
+    }
+
+    private void recoverRemoteVideoStartup() {
+        if (remoteMediaPlayer == null || remoteVideoStartupRecoveryPending || isFinishing()) {
+            return;
+        }
+        remoteVideoStartupRecoveryCount++;
+        remoteVideoStartupRecoveryPending = true;
+        remoteVideoResumeAfterBuffering = true;
+        showLoading(t("Buffering video", "正在缓冲视频"));
+        try {
+            remoteMediaPlayer.pause();
+            seekRemoteVideoTo(0);
+        } catch (IllegalStateException ignored) {
+            remoteVideoStartupRecoveryPending = false;
+            hideLoading();
+        }
+        bringOverlayControlsToFront();
+    }
+
+    private void finishRemoteVideoStartupRecovery() {
+        if (!remoteVideoStartupRecoveryPending || remoteMediaPlayer == null || isFinishing()) {
+            return;
+        }
+        boolean shouldResume = remoteVideoResumeAfterBuffering && !remoteVideoUserPaused && !actionInProgress;
+        remoteVideoStartupRecoveryPending = false;
+        remoteVideoResumeAfterBuffering = false;
+        hideLoading();
+        if (shouldResume) {
+            try {
+                remoteVideoLastFrameMillis = 0L;
+                remoteMediaPlayer.start();
+                scheduleRemoteVideoStartupWatchdog();
+            } catch (IllegalStateException ignored) {
+                // Leave playback paused if the player state changed during recovery.
+            }
+        }
+        bringOverlayControlsToFront();
+        enterImmersiveMode();
+    }
+
+    private void seekRemoteVideoTo(int positionMillis) {
+        if (remoteMediaPlayer == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            remoteMediaPlayer.seekTo(positionMillis, MediaPlayer.SEEK_CLOSEST_SYNC);
+        } else {
+            remoteMediaPlayer.seekTo(positionMillis);
+        }
+    }
+
+    private void pauseRemoteVideoForBuffering() {
+        if (remoteVideoSeekStartPending || remoteVideoStartupRecoveryPending || remoteVideoInitialBuffering || !remoteVideoPrepared || remoteMediaPlayer == null || actionInProgress || isFinishing()) {
+            return;
+        }
+        if (!remoteVideoAutoBuffering) {
+            remoteVideoAutoBuffering = true;
+            remoteVideoResumeAfterBuffering = false;
+            try {
+                remoteVideoResumeAfterBuffering = remoteMediaPlayer.isPlaying() && !remoteVideoUserPaused;
+                if (remoteVideoResumeAfterBuffering) {
+                    remoteMediaPlayer.pause();
+                }
+            } catch (IllegalStateException ignored) {
+                remoteVideoResumeAfterBuffering = false;
+            }
+            showLoading(t("Buffering video", "正在缓冲视频"));
+            if (remoteMediaController != null) {
+                remoteMediaController.show(0);
+            }
+        }
+        bringOverlayControlsToFront();
+    }
+
+    private void resumeRemoteVideoAfterBuffering() {
+        if (remoteVideoSeekStartPending || remoteVideoStartupRecoveryPending || remoteVideoInitialBuffering || !remoteVideoAutoBuffering || remoteMediaPlayer == null || isFinishing()) {
+            return;
+        }
+        boolean shouldResume = remoteVideoResumeAfterBuffering && !remoteVideoUserPaused && !actionInProgress;
+        remoteVideoAutoBuffering = false;
+        remoteVideoResumeAfterBuffering = false;
+        hideLoading();
+        if (shouldResume) {
+            try {
+                remoteMediaPlayer.start();
+                if (remoteMediaController != null) {
+                    remoteMediaController.show(1500);
+                }
+            } catch (IllegalStateException ignored) {
+                // Playback state changed while buffering; leave it paused.
+            }
+        }
+        bringOverlayControlsToFront();
+        enterImmersiveMode();
     }
 
     private void playLocalVideo(Uri uri) {
@@ -717,9 +981,19 @@ public final class RemoteMediaViewerActivity extends Activity {
         }
         closeRemoteDataSource(remoteMediaDataSource);
         remoteMediaDataSource = null;
+        main.removeCallbacks(remoteVideoStartupWatchdog);
+        remoteVideoPrepared = false;
+        remoteVideoUserPaused = false;
+        remoteVideoInitialBuffering = false;
+        remoteVideoAutoBuffering = false;
+        remoteVideoResumeAfterBuffering = false;
+        remoteVideoSeekStartPending = false;
+        remoteVideoStartupRecoveryPending = false;
+        remoteVideoStartupRecoveryCount = 0;
+        remoteVideoLastFrameMillis = 0L;
     }
 
-    private static void closeRemoteDataSource(RemoteSmbMediaDataSource dataSource) {
+    private static void closeRemoteDataSource(RemoteVideoCacheDataSource dataSource) {
         if (dataSource == null) {
             return;
         }
@@ -731,7 +1005,7 @@ public final class RemoteMediaViewerActivity extends Activity {
         closeRemoteDataSourceNow(dataSource);
     }
 
-    private static void closeRemoteDataSourceNow(RemoteSmbMediaDataSource dataSource) {
+    private static void closeRemoteDataSourceNow(RemoteVideoCacheDataSource dataSource) {
         try {
             dataSource.close();
         } catch (IOException ignored) {
@@ -1124,6 +1398,11 @@ public final class RemoteMediaViewerActivity extends Activity {
         return UiText.isChinese(this);
     }
 
+    private String remoteVideoBufferingText(int percent) {
+        int safePercent = Math.max(0, Math.min(100, percent));
+        return isChinese() ? "正在缓冲视频 " + safePercent + "%" : "Buffering video " + safePercent + "%";
+    }
+
     private void addBackButton() {
         backButton = new ImageButton(this);
         backButton.setImageResource(R.drawable.ic_arrow_back);
@@ -1407,13 +1686,24 @@ public final class RemoteMediaViewerActivity extends Activity {
         @Override
         public void start() {
             if (remoteMediaPlayer != null) {
+                remoteVideoUserPaused = false;
+                if (remoteVideoInitialBuffering || remoteVideoAutoBuffering || remoteVideoSeekStartPending || remoteVideoStartupRecoveryPending) {
+                    remoteVideoResumeAfterBuffering = true;
+                    return;
+                }
                 remoteMediaPlayer.start();
+                scheduleRemoteVideoStartupWatchdog();
             }
         }
 
         @Override
         public void pause() {
             if (remoteMediaPlayer != null) {
+                remoteVideoUserPaused = true;
+                remoteVideoResumeAfterBuffering = false;
+                if (remoteVideoInitialBuffering) {
+                    return;
+                }
                 remoteMediaPlayer.pause();
             }
         }
@@ -1454,7 +1744,7 @@ public final class RemoteMediaViewerActivity extends Activity {
 
         @Override
         public int getBufferPercentage() {
-            return 100;
+            return remoteMediaDataSource == null ? 0 : remoteMediaDataSource.bufferPercentage();
         }
 
         @Override
@@ -1482,19 +1772,50 @@ public final class RemoteMediaViewerActivity extends Activity {
         }
     }
 
-    private static final class RemoteSmbMediaDataSource extends MediaDataSource {
-        private final SmbRandomAccessFile file;
-        private final long length;
-        private boolean closed;
+    private static final class RemoteVideoCacheDataSource extends MediaDataSource {
+        interface Listener {
+            void onBuffering();
 
-        RemoteSmbMediaDataSource(SmbFile source, long declaredLength) throws IOException {
-            file = new SmbRandomAccessFile(source, "r");
-            length = declaredLength > 0L ? declaredLength : file.length();
+            void onReady();
+        }
+
+        private static final int COPY_BUFFER_BYTES = 256 * 1024;
+        private static final long RANDOM_READ_GAP_BYTES = 8L * 1024L * 1024L;
+        private static final long REBUFFER_READY_BYTES = 12L * 1024L * 1024L;
+        private static final long FALLBACK_INITIAL_READY_BYTES = 24L * 1024L * 1024L;
+        private static final long MAX_INITIAL_READY_BYTES = 64L * 1024L * 1024L;
+
+        private final Object stateLock = new Object();
+        private final Object randomReadLock = new Object();
+        private final SmbFile source;
+        private final File cacheFile;
+        private final RandomAccessFile cacheReader;
+        private final long length;
+        private Thread copyThread;
+        private SmbRandomAccessFile randomReader;
+        private long cachedLength;
+        private boolean complete;
+        private boolean closed;
+        private IOException copyFailure;
+        private Listener listener;
+
+        RemoteVideoCacheDataSource(SmbFile source, long declaredLength, File cacheDirectory) throws IOException {
+            this.source = source;
+            length = declaredLength > 0L ? declaredLength : source.length();
+            cacheFile = File.createTempFile("samba_video_", ".cache", cacheDirectory);
+            cacheReader = new RandomAccessFile(cacheFile, "r");
+            startCopyThread();
+        }
+
+        void setListener(Listener listener) {
+            synchronized (stateLock) {
+                this.listener = listener;
+            }
         }
 
         @Override
-        public synchronized int readAt(long position, byte[] buffer, int offset, int size) throws IOException {
-            if (closed || position < 0L) {
+        public int readAt(long position, byte[] buffer, int offset, int size) throws IOException {
+            if (position < 0L) {
                 return -1;
             }
             if (size == 0) {
@@ -1503,12 +1824,64 @@ public final class RemoteMediaViewerActivity extends Activity {
             if (length > 0L && position >= length) {
                 return -1;
             }
-            int bytesToRead = size;
+            int maxBytes = size;
             if (length > 0L) {
-                bytesToRead = (int) Math.min(size, length - position);
+                maxBytes = (int) Math.min(size, length - position);
             }
-            file.seek(position);
-            return file.read(buffer, offset, bytesToRead);
+
+            boolean pausedForBuffering = false;
+            while (true) {
+                long available;
+                boolean canWaitForSequentialCache;
+                boolean readyAfterBuffering;
+                synchronized (stateLock) {
+                    if (closed) {
+                        return -1;
+                    }
+                    available = cachedLength - position;
+                    readyAfterBuffering = pausedForBuffering
+                            && (complete || available >= rebufferReadyBytes(position, maxBytes));
+                    if (available > 0L && (!pausedForBuffering || readyAfterBuffering)) {
+                        break;
+                    }
+                    if (complete) {
+                        return copyFailure == null ? -1 : readFromRemote(position, buffer, offset, maxBytes);
+                    }
+                    canWaitForSequentialCache = position <= cachedLength + RANDOM_READ_GAP_BYTES;
+                    if (!canWaitForSequentialCache) {
+                        break;
+                    }
+                }
+
+                if (!pausedForBuffering) {
+                    pausedForBuffering = true;
+                    notifyBuffering();
+                }
+
+                synchronized (stateLock) {
+                    try {
+                        stateLock.wait(350L);
+                    } catch (InterruptedException exc) {
+                        Thread.currentThread().interrupt();
+                        return -1;
+                    }
+                }
+
+                if (!canWaitForSequentialCache) {
+                    break;
+                }
+            }
+            if (pausedForBuffering) {
+                notifyReady();
+            }
+
+            synchronized (stateLock) {
+                long available = cachedLength - position;
+                if (available > 0L) {
+                    return readFromCache(position, buffer, offset, (int) Math.min(maxBytes, available));
+                }
+            }
+            return readFromRemote(position, buffer, offset, maxBytes);
         }
 
         @Override
@@ -1516,13 +1889,173 @@ public final class RemoteMediaViewerActivity extends Activity {
             return length;
         }
 
-        @Override
-        public synchronized void close() throws IOException {
-            if (closed) {
-                return;
+        int bufferPercentage() {
+            if (length <= 0L) {
+                return 0;
             }
-            closed = true;
-            file.close();
+            synchronized (stateLock) {
+                return (int) Math.max(0L, Math.min(100L, cachedLength * 100L / length));
+            }
+        }
+
+        boolean hasPlaybackBuffer(long position, long durationMillis, long targetMillis) {
+            long targetBytes = playbackBufferBytes(position, durationMillis, targetMillis);
+            synchronized (stateLock) {
+                return complete || cachedLength - position >= targetBytes;
+            }
+        }
+
+        int playbackBufferPercent(long position, long durationMillis, long targetMillis) {
+            long targetBytes = playbackBufferBytes(position, durationMillis, targetMillis);
+            if (targetBytes <= 0L) {
+                return 100;
+            }
+            synchronized (stateLock) {
+                if (complete) {
+                    return 100;
+                }
+                long available = Math.max(0L, cachedLength - position);
+                return (int) Math.max(0L, Math.min(100L, available * 100L / targetBytes));
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            Thread threadToJoin;
+            synchronized (stateLock) {
+                if (closed) {
+                    return;
+                }
+                closed = true;
+                threadToJoin = copyThread;
+                stateLock.notifyAll();
+            }
+            if (threadToJoin != null) {
+                threadToJoin.interrupt();
+            }
+            synchronized (randomReadLock) {
+                if (randomReader != null) {
+                    randomReader.close();
+                    randomReader = null;
+                }
+            }
+            cacheReader.close();
+            if (!cacheFile.delete()) {
+                cacheFile.deleteOnExit();
+            }
+        }
+
+        private void startCopyThread() {
+            copyThread = new Thread(this::copyRemoteToCache, "Samba video cache");
+            copyThread.setDaemon(true);
+            copyThread.start();
+        }
+
+        private void copyRemoteToCache() {
+            long written = 0L;
+            try (BufferedInputStream input = new BufferedInputStream(new SmbFileInputStream(source));
+                 FileOutputStream output = new FileOutputStream(cacheFile)) {
+                byte[] buffer = new byte[COPY_BUFFER_BYTES];
+                int read;
+                while (!isClosed() && (read = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, read);
+                    written += read;
+                    synchronized (stateLock) {
+                        cachedLength = written;
+                        stateLock.notifyAll();
+                    }
+                }
+                output.flush();
+                synchronized (stateLock) {
+                    complete = true;
+                    cachedLength = Math.max(cachedLength, written);
+                    stateLock.notifyAll();
+                }
+            } catch (IOException exc) {
+                synchronized (stateLock) {
+                    copyFailure = exc;
+                    complete = true;
+                    stateLock.notifyAll();
+                }
+            }
+        }
+
+        private boolean isClosed() {
+            synchronized (stateLock) {
+                return closed;
+            }
+        }
+
+        private int readFromCache(long position, byte[] buffer, int offset, int bytesToRead) throws IOException {
+            synchronized (cacheReader) {
+                cacheReader.seek(position);
+                return cacheReader.read(buffer, offset, bytesToRead);
+            }
+        }
+
+        private int readFromRemote(long position, byte[] buffer, int offset, int bytesToRead) throws IOException {
+            synchronized (randomReadLock) {
+                if (randomReader == null) {
+                    randomReader = new SmbRandomAccessFile(source, "r");
+                }
+                for (int attempt = 0; attempt < 3; attempt++) {
+                    randomReader.seek(position);
+                    int read = randomReader.read(buffer, offset, bytesToRead);
+                    if (read >= 0 || length <= 0L || position >= length) {
+                        return read;
+                    }
+                    try {
+                        Thread.sleep(80L);
+                    } catch (InterruptedException exc) {
+                        Thread.currentThread().interrupt();
+                        return -1;
+                    }
+                }
+                throw new IOException("Could not read remote video bytes");
+            }
+        }
+
+        private long rebufferReadyBytes(long position, int maxBytes) {
+            long target = Math.max((long) maxBytes, REBUFFER_READY_BYTES);
+            if (length <= 0L) {
+                return target;
+            }
+            return Math.max(1L, Math.min(target, length - position));
+        }
+
+        private long playbackBufferBytes(long position, long durationMillis, long targetMillis) {
+            long target;
+            if (length > 0L && durationMillis > 0L) {
+                target = (long) Math.ceil(length * (targetMillis / (double) durationMillis));
+            } else {
+                target = FALLBACK_INITIAL_READY_BYTES;
+            }
+            target = Math.max(REBUFFER_READY_BYTES, target);
+            target = Math.min(MAX_INITIAL_READY_BYTES, target);
+            if (length > 0L) {
+                target = Math.min(target, Math.max(1L, length - position));
+            }
+            return Math.max(1L, target);
+        }
+
+        private void notifyBuffering() {
+            Listener current;
+            synchronized (stateLock) {
+                current = listener;
+            }
+            if (current != null) {
+                current.onBuffering();
+            }
+        }
+
+        private void notifyReady() {
+            Listener current;
+            synchronized (stateLock) {
+                current = listener;
+            }
+            if (current != null) {
+                current.onReady();
+            }
         }
     }
 
