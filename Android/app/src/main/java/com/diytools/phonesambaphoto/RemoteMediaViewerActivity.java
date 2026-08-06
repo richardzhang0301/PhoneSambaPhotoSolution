@@ -1,5 +1,6 @@
 package com.diytools.phonesambaphoto;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.PendingIntent;
@@ -8,11 +9,13 @@ import android.content.Context;
 import android.content.ContentUris;
 import android.content.Intent;
 import android.content.IntentSender;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
+import android.graphics.RectF;
 import android.graphics.SurfaceTexture;
 import android.graphics.drawable.GradientDrawable;
 import android.media.MediaDataSource;
@@ -70,6 +73,7 @@ public final class RemoteMediaViewerActivity extends Activity {
     private static final String EXTRA_VIDEO = "video";
     private static final String EXTRA_INDEX = "index";
     private static final int REQUEST_DELETE_LOCAL = 2001;
+    private static final int REQUEST_DOWNLOAD_REMOTE = 2002;
     private static final Object NAVIGATION_LOCK = new Object();
     private static final Object MEDIA_CHANGED_LOCK = new Object();
     private static ArrayList<ViewerItem> navigationSession = new ArrayList<>();
@@ -82,10 +86,12 @@ public final class RemoteMediaViewerActivity extends Activity {
     private ProgressBar progress;
     private TextView status;
     private ImageButton backButton;
+    private ImageButton rotateButton;
     private LinearLayout actionBar;
     private Button uploadButton;
+    private Button downloadButton;
     private Button deleteButton;
-    private ImageView thumbnailView;
+    private ZoomImageView thumbnailView;
     private ZoomImageView photoView;
     private VideoView videoView;
     private TextureView remoteVideoTexture;
@@ -109,6 +115,8 @@ public final class RemoteMediaViewerActivity extends Activity {
     private int remoteVideoWidth;
     private int remoteVideoHeight;
     private boolean actionInProgress;
+    private boolean retryDownloadAfterPermission;
+    private int photoRotationDegrees;
 
     static void open(Context context, RemotePhotoItem item) {
         ArrayList<ViewerItem> items = new ArrayList<>();
@@ -222,6 +230,7 @@ public final class RemoteMediaViewerActivity extends Activity {
         root.setBackgroundColor(Color.BLACK);
         setContentView(root);
         addBackButton();
+        addRotateButton();
         addActionButtons();
         enterImmersiveMode();
 
@@ -274,6 +283,21 @@ public final class RemoteMediaViewerActivity extends Activity {
             afterDeleteCurrentItem();
         } else {
             showActionToast(t("Delete cancelled", "已取消删除"));
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQUEST_DOWNLOAD_REMOTE) {
+            return;
+        }
+        if (hasDownloadPermission() && retryDownloadAfterPermission) {
+            retryDownloadAfterPermission = false;
+            downloadRemoteCurrentItem();
+        } else {
+            retryDownloadAfterPermission = false;
+            showActionToast(t("Storage permission is needed to download", "下载需要存储权限"));
         }
     }
 
@@ -336,10 +360,10 @@ public final class RemoteMediaViewerActivity extends Activity {
         }
         hideLoading();
         photoView = null;
-        thumbnailView = new ImageView(this);
-        thumbnailView.setBackgroundColor(Color.BLACK);
-        thumbnailView.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        thumbnailView.setImageBitmap(bitmap);
+        thumbnailView = new ZoomImageView(this);
+        thumbnailView.setZoomEnabled(false);
+        thumbnailView.setBitmap(bitmap);
+        thumbnailView.setRotationDegrees(photoRotationDegrees);
         root.addView(thumbnailView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -361,6 +385,7 @@ public final class RemoteMediaViewerActivity extends Activity {
         ZoomImageView imageView = new ZoomImageView(this);
         photoView = imageView;
         imageView.setBitmap(bitmap);
+        imageView.setRotationDegrees(photoRotationDegrees);
         root.addView(imageView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -824,6 +849,64 @@ public final class RemoteMediaViewerActivity extends Activity {
         });
     }
 
+    private void downloadRemoteCurrentItem() {
+        if (actionInProgress || !isRemote() || TextUtils.isEmpty(url)) {
+            return;
+        }
+        SambaSettings settings = SambaSettings.load(this);
+        if (!settings.isConfigured()) {
+            showActionToast(t("Set Samba folder first", "请先设置 Samba 文件夹"));
+            return;
+        }
+        if (!hasDownloadPermission()) {
+            retryDownloadAfterPermission = true;
+            requestDownloadPermission();
+            return;
+        }
+
+        ArrayList<RemotePhotoItem> item = new ArrayList<>();
+        item.add(currentRemotePhotoItem());
+        actionInProgress = true;
+        updateActionButtons();
+        showLoading(t("Downloading", "正在下载"));
+
+        executor.execute(() -> {
+            SambaDownloader.Summary summary = SambaDownloader.download(
+                    getApplicationContext(),
+                    settings,
+                    item,
+                    new SambaDownloader.Listener() {
+                        @Override
+                        public void onProgress(int done, int total, String message) {
+                            main.post(() -> updateLoadingMessage(message));
+                        }
+
+                        @Override
+                        public void onItemFinished(RemotePhotoItem remoteItem, PhotoItem localItem) {
+                        }
+                    }
+            );
+
+            main.post(() -> {
+                actionInProgress = false;
+                hideLoading();
+                updateActionButtons();
+                if (summary.failed == 0 && summary.downloaded + summary.skipped > 0) {
+                    markMediaChanged();
+                    showActionToast(summary.skipped > 0 ? t("Already on phone", "已在手机上") : t("Download complete", "下载完成"));
+                } else {
+                    showActionToast(t("Download failed", "下载失败"));
+                }
+                bringOverlayControlsToFront();
+            });
+        });
+    }
+
+    private RemotePhotoItem currentRemotePhotoItem() {
+        String itemName = TextUtils.isEmpty(name) ? (video ? t("video", "视频") : t("photo", "照片")) : name;
+        return new RemotePhotoItem(itemName, url, thumbnailUrl, size, modified, video);
+    }
+
     private PhotoItem currentLocalPhotoItem() {
         Uri uri = Uri.parse(uriString);
         long id = 0L;
@@ -1019,6 +1102,20 @@ public final class RemoteMediaViewerActivity extends Activity {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
     }
 
+    private boolean hasDownloadPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return true;
+        }
+        return checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void requestDownloadPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return;
+        }
+        requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_DOWNLOAD_REMOTE);
+    }
+
     private String t(String english, String chinese) {
         return UiText.text(this, english, chinese);
     }
@@ -1044,17 +1141,55 @@ public final class RemoteMediaViewerActivity extends Activity {
         root.addView(backButton, params);
     }
 
+    private void addRotateButton() {
+        if (video) {
+            return;
+        }
+        rotateButton = new ImageButton(this);
+        rotateButton.setImageResource(R.drawable.ic_rotate_photo);
+        rotateButton.setContentDescription(t("Rotate", "旋转"));
+        rotateButton.setScaleType(ImageView.ScaleType.CENTER);
+        rotateButton.setPadding(dp(12), dp(12), dp(12), dp(12));
+        GradientDrawable background = new GradientDrawable();
+        background.setShape(GradientDrawable.OVAL);
+        background.setColor(Color.argb(155, 0, 0, 0));
+        rotateButton.setBackground(background);
+        rotateButton.setOnClickListener(view -> rotateCurrentPhoto());
+
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP | Gravity.END);
+        params.setMargins(0, topControlMargin(), dp(14), 0);
+        root.addView(rotateButton, params);
+    }
+
+    private void rotateCurrentPhoto() {
+        if (video || actionInProgress) {
+            return;
+        }
+        photoRotationDegrees = (photoRotationDegrees + 90) % 360;
+        if (photoView != null) {
+            photoView.setRotationDegrees(photoRotationDegrees);
+        }
+        if (thumbnailView != null) {
+            thumbnailView.setRotationDegrees(photoRotationDegrees);
+        }
+        bringOverlayControlsToFront();
+    }
+
     private void addActionButtons() {
         actionBar = new LinearLayout(this);
         actionBar.setGravity(Gravity.CENTER);
         actionBar.setOrientation(LinearLayout.HORIZONTAL);
 
         if (isRemote()) {
-            actionBar.addView(new View(this), new LinearLayout.LayoutParams(0, dp(44), 1));
+            downloadButton = actionButton(t("Download", "下载"), false);
+            downloadButton.setOnClickListener(view -> downloadRemoteCurrentItem());
+            LinearLayout.LayoutParams downloadParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+            downloadParams.setMargins(0, 0, dp(8), 0);
+            actionBar.addView(downloadButton, downloadParams);
+
             deleteButton = actionButton(t("Delete", "删除"), true);
             deleteButton.setOnClickListener(view -> confirmDeleteCurrentItem());
             actionBar.addView(deleteButton, new LinearLayout.LayoutParams(0, dp(44), 1));
-            actionBar.addView(new View(this), new LinearLayout.LayoutParams(0, dp(44), 1));
         } else {
             uploadButton = actionButton(t("Upload", "上传"), false);
             uploadButton.setOnClickListener(view -> uploadLocalCurrentItem());
@@ -1099,8 +1234,14 @@ public final class RemoteMediaViewerActivity extends Activity {
         if (uploadButton != null) {
             uploadButton.setEnabled(!actionInProgress && !isRemote());
         }
+        if (downloadButton != null) {
+            downloadButton.setEnabled(!actionInProgress && isRemote());
+        }
         if (deleteButton != null) {
             deleteButton.setEnabled(!actionInProgress);
+        }
+        if (rotateButton != null) {
+            rotateButton.setEnabled(!actionInProgress && !video);
         }
     }
 
@@ -1125,6 +1266,9 @@ public final class RemoteMediaViewerActivity extends Activity {
     private void bringOverlayControlsToFront() {
         if (backButton != null) {
             backButton.bringToFront();
+        }
+        if (rotateButton != null) {
+            rotateButton.bringToFront();
         }
         if (actionBar != null) {
             actionBar.bringToFront();
@@ -1384,7 +1528,7 @@ public final class RemoteMediaViewerActivity extends Activity {
 
     private static final class ZoomImageView extends View {
         private final Matrix matrix = new Matrix();
-        private final float[] values = new float[9];
+        private final RectF bitmapBounds = new RectF();
         private final ScaleGestureDetector scaleDetector;
         private final GestureDetector gestureDetector;
         private Bitmap bitmap;
@@ -1393,6 +1537,8 @@ public final class RemoteMediaViewerActivity extends Activity {
         private float currentScale = 1f;
         private float lastX;
         private float lastY;
+        private int rotationDegrees;
+        private boolean zoomEnabled = true;
 
         ZoomImageView(Context context) {
             super(context);
@@ -1440,6 +1586,20 @@ public final class RemoteMediaViewerActivity extends Activity {
             invalidate();
         }
 
+        void setZoomEnabled(boolean zoomEnabled) {
+            this.zoomEnabled = zoomEnabled;
+        }
+
+        void setRotationDegrees(int rotationDegrees) {
+            int normalized = rotationDegrees % 360;
+            if (normalized < 0) {
+                normalized += 360;
+            }
+            this.rotationDegrees = normalized;
+            resetMatrix();
+            invalidate();
+        }
+
         boolean isAtBaseScale() {
             return currentScale <= minScale * 1.05f;
         }
@@ -1460,6 +1620,9 @@ public final class RemoteMediaViewerActivity extends Activity {
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
+            if (!zoomEnabled) {
+                return true;
+            }
             gestureDetector.onTouchEvent(event);
             scaleDetector.onTouchEvent(event);
 
@@ -1492,15 +1655,18 @@ public final class RemoteMediaViewerActivity extends Activity {
             if (bitmap == null || getWidth() <= 0 || getHeight() <= 0) {
                 return;
             }
+            boolean quarterTurn = rotationDegrees == 90 || rotationDegrees == 270;
+            int rotatedWidth = quarterTurn ? bitmap.getHeight() : bitmap.getWidth();
+            int rotatedHeight = quarterTurn ? bitmap.getWidth() : bitmap.getHeight();
             float scale = Math.min(
-                    getWidth() / (float) bitmap.getWidth(),
-                    getHeight() / (float) bitmap.getHeight()
+                    getWidth() / (float) rotatedWidth,
+                    getHeight() / (float) rotatedHeight
             );
-            float dx = (getWidth() - bitmap.getWidth() * scale) / 2f;
-            float dy = (getHeight() - bitmap.getHeight() * scale) / 2f;
             matrix.reset();
+            matrix.postTranslate(-bitmap.getWidth() / 2f, -bitmap.getHeight() / 2f);
+            matrix.postRotate(rotationDegrees);
             matrix.postScale(scale, scale);
-            matrix.postTranslate(dx, dy);
+            matrix.postTranslate(getWidth() / 2f, getHeight() / 2f);
             minScale = scale;
             currentScale = scale;
             maxScale = Math.max(scale * 5f, 5f);
@@ -1510,29 +1676,30 @@ public final class RemoteMediaViewerActivity extends Activity {
             if (bitmap == null) {
                 return;
             }
-            matrix.getValues(values);
-            float scale = values[Matrix.MSCALE_X];
-            float scaledWidth = bitmap.getWidth() * scale;
-            float scaledHeight = bitmap.getHeight() * scale;
-            float translateX = values[Matrix.MTRANS_X];
-            float translateY = values[Matrix.MTRANS_Y];
+            bitmapBounds.set(0f, 0f, bitmap.getWidth(), bitmap.getHeight());
+            matrix.mapRect(bitmapBounds);
+            float dx = 0f;
+            float dy = 0f;
 
-            if (scaledWidth <= getWidth()) {
-                translateX = (getWidth() - scaledWidth) / 2f;
-            } else {
-                translateX = Math.min(0f, Math.max(getWidth() - scaledWidth, translateX));
+            if (bitmapBounds.width() <= getWidth()) {
+                dx = getWidth() / 2f - bitmapBounds.centerX();
+            } else if (bitmapBounds.left > 0f) {
+                dx = -bitmapBounds.left;
+            } else if (bitmapBounds.right < getWidth()) {
+                dx = getWidth() - bitmapBounds.right;
             }
 
-            if (scaledHeight <= getHeight()) {
-                translateY = (getHeight() - scaledHeight) / 2f;
-            } else {
-                translateY = Math.min(0f, Math.max(getHeight() - scaledHeight, translateY));
+            if (bitmapBounds.height() <= getHeight()) {
+                dy = getHeight() / 2f - bitmapBounds.centerY();
+            } else if (bitmapBounds.top > 0f) {
+                dy = -bitmapBounds.top;
+            } else if (bitmapBounds.bottom < getHeight()) {
+                dy = getHeight() - bitmapBounds.bottom;
             }
 
-            values[Matrix.MTRANS_X] = translateX;
-            values[Matrix.MTRANS_Y] = translateY;
-            matrix.setValues(values);
-            currentScale = scale;
+            if (dx != 0f || dy != 0f) {
+                matrix.postTranslate(dx, dy);
+            }
         }
     }
 }

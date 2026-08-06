@@ -67,6 +67,7 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_IMAGES = 1001;
     private static final int REQUEST_DELETE_SELECTED = 1002;
     private static final int REQUEST_PICK_SAMBA_UPLOAD = 1003;
+    private static final int REQUEST_DOWNLOAD_REMOTE = 1004;
 
     private enum Tab {
         LOCAL,
@@ -85,6 +86,7 @@ public final class MainActivity extends Activity {
     private final List<PhotoItem> photos = new ArrayList<>();
     private final List<RemotePhotoItem> remotePhotos = new ArrayList<>();
     private final List<PhotoItem> pendingDeleteItems = new ArrayList<>();
+    private final List<RemotePhotoItem> pendingDownloadItems = new ArrayList<>();
 
     private ThumbLoader thumbLoader;
     private RemoteThumbLoader remoteThumbLoader;
@@ -111,14 +113,17 @@ public final class MainActivity extends Activity {
     private Button syncAllButton;
     private Button deleteSyncedButton;
     private Button uploadSelectedButton;
+    private Button downloadSelectedButton;
     private Button noSyncButton;
     private Button reEnableSyncButton;
     private Button deleteSelectedButton;
     private Button cancelSelectionButton;
     private Tab selectedTab = Tab.LOCAL;
     private boolean uploading;
+    private boolean downloading;
     private boolean deleting;
     private boolean retryDeleteAfterPermission;
+    private boolean retryDownloadAfterPermission;
     private boolean localLoaded;
     private boolean remoteLoaded;
     private boolean selectionMode;
@@ -181,13 +186,13 @@ public final class MainActivity extends Activity {
             return;
         }
         remoteLoaded = false;
+        localLoaded = false;
         if (remoteThumbLoader != null) {
             remoteThumbLoader.clear();
         }
         if (selectedTab == Tab.REMOTE) {
             loadRemotePhotos();
         } else {
-            localLoaded = false;
             loadPhotos();
         }
     }
@@ -210,6 +215,19 @@ public final class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_DOWNLOAD_REMOTE) {
+            if (hasDownloadPermission() && retryDownloadAfterPermission) {
+                retryDownloadAfterPermission = false;
+                List<RemotePhotoItem> pending = new ArrayList<>(pendingDownloadItems);
+                pendingDownloadItems.clear();
+                downloadRemoteSelected(pending);
+            } else {
+                retryDownloadAfterPermission = false;
+                pendingDownloadItems.clear();
+                setStatus(t("Storage permission is needed to download", "下载需要存储权限"));
+            }
+            return;
+        }
         if (requestCode == REQUEST_IMAGES && hasPhotoPermission()) {
             loadPhotos();
         } else if (selectedTab == Tab.LOCAL) {
@@ -340,6 +358,12 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams uploadParams = new LinearLayout.LayoutParams(0, dp(44), 1);
         uploadParams.setMargins(0, 0, dp(8), 0);
         buttonRow.addView(uploadSelectedButton, uploadParams);
+
+        downloadSelectedButton = secondaryButton(t("Download", "下载"), R.drawable.ic_download);
+        downloadSelectedButton.setOnClickListener(v -> downloadSelectedFromSamba());
+        LinearLayout.LayoutParams downloadParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+        downloadParams.setMargins(0, 0, dp(8), 0);
+        buttonRow.addView(downloadSelectedButton, downloadParams);
 
         deleteSelectedButton = destructiveButton(t("Delete", "删除"));
         deleteSelectedButton.setOnClickListener(v -> confirmDeleteSelected());
@@ -767,7 +791,7 @@ public final class MainActivity extends Activity {
     }
 
     private void openSambaUploadPicker() {
-        if (uploading || deleting || selectedTab != Tab.REMOTE) {
+        if (isBusy() || selectedTab != Tab.REMOTE) {
             return;
         }
         SambaSettings settings = SambaSettings.load(this);
@@ -973,7 +997,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showThumbnailCacheWipeDialog() {
-        if (uploading || deleting) {
+        if (isBusy()) {
             return;
         }
 
@@ -1220,7 +1244,7 @@ public final class MainActivity extends Activity {
     }
 
     private void selectAll() {
-        if (selectedTab != Tab.LOCAL || uploading || deleting) {
+        if (selectedTab != Tab.LOCAL || isBusy()) {
             return;
         }
         if (photos.isEmpty()) {
@@ -1231,7 +1255,7 @@ public final class MainActivity extends Activity {
     }
 
     private void selectDateRange(long startMillis, long endMillis) {
-        if (uploading || deleting) {
+        if (isBusy()) {
             return;
         }
         clearLocalSelection();
@@ -1260,6 +1284,9 @@ public final class MainActivity extends Activity {
         SambaSettings settings = SambaSettings.load(this);
         if (!settings.isConfigured()) {
             showSettingsDialog();
+            return;
+        }
+        if (isBusy()) {
             return;
         }
         showSyncDateRangeDialog(settings);
@@ -1479,7 +1506,7 @@ public final class MainActivity extends Activity {
     }
 
     private void uploadSelected() {
-        if (selectedTab != Tab.LOCAL || !selectionMode || deleting) {
+        if (selectedTab != Tab.LOCAL || !selectionMode || isBusy()) {
             return;
         }
         SambaSettings settings = SambaSettings.load(this);
@@ -1495,8 +1522,102 @@ public final class MainActivity extends Activity {
         startUpload(settings, selected);
     }
 
+    private void downloadSelectedFromSamba() {
+        if (selectedTab != Tab.REMOTE || !selectionMode || isBusy()) {
+            return;
+        }
+        List<RemotePhotoItem> selected = selectedRemoteItems();
+        if (selected.isEmpty()) {
+            setStatus(t("Select Samba media to download", "请选择要从 Samba 下载的媒体"));
+            return;
+        }
+        downloadRemoteSelected(selected);
+    }
+
+    private void downloadRemoteSelected(List<RemotePhotoItem> selected) {
+        if (selected.isEmpty()) {
+            setStatus(t("Select Samba media to download", "请选择要从 Samba 下载的媒体"));
+            return;
+        }
+        SambaSettings settings = SambaSettings.load(this);
+        if (!settings.isConfigured()) {
+            showSettingsDialog();
+            return;
+        }
+        if (!hasDownloadPermission()) {
+            pendingDownloadItems.clear();
+            pendingDownloadItems.addAll(selected);
+            retryDownloadAfterPermission = true;
+            requestDownloadPermission();
+            return;
+        }
+        startRemoteDownload(settings, selected);
+    }
+
+    private void startRemoteDownload(SambaSettings settings, List<RemotePhotoItem> selected) {
+        if (isBusy()) {
+            return;
+        }
+        downloading = true;
+        progress.setIndeterminate(false);
+        progress.setMax(Math.max(1, selected.size()));
+        progress.setProgress(0);
+        progress.setVisibility(View.VISIBLE);
+        setStatus(downloadingFromSambaText(selected.size()));
+        updateButtons();
+
+        remoteExecutor.execute(() -> {
+            SambaDownloader.Summary summary = SambaDownloader.download(
+                    getApplicationContext(),
+                    settings,
+                    selected,
+                    new SambaDownloader.Listener() {
+                        @Override
+                        public void onProgress(int done, int total, String message) {
+                            main.post(() -> {
+                                progress.setMax(Math.max(1, total));
+                                progress.setProgress(done);
+                                setStatus(message);
+                            });
+                        }
+
+                        @Override
+                        public void onItemFinished(RemotePhotoItem remoteItem, PhotoItem localItem) {
+                            main.post(() -> {
+                                remoteItem.selected = false;
+                                if (remoteAdapter != null) {
+                                    remoteAdapter.notifyDataSetChanged();
+                                }
+                            });
+                        }
+                    });
+            main.post(() -> finishRemoteDownload(summary));
+        });
+    }
+
+    private void finishRemoteDownload(SambaDownloader.Summary summary) {
+        downloading = false;
+        progress.setIndeterminate(false);
+        progress.setVisibility(View.GONE);
+        selectionMode = false;
+        clearRemoteSelection();
+        localLoaded = false;
+        if (remoteAdapter != null) {
+            remoteAdapter.notifyDataSetChanged();
+        }
+        updateButtons();
+
+        if (summary.downloaded + summary.skipped > 0) {
+            String message = downloadSummaryText(summary.downloaded, summary.skipped, summary.failed);
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+            setStatus(message);
+        } else {
+            setStatus(summary.failed > 0 ? t("Download failed", "下载失败") : t("Nothing downloaded", "未下载任何内容"));
+        }
+    }
+
     private void markSelectedNoSync() {
-        if (selectedTab != Tab.LOCAL || !selectionMode || uploading || deleting) {
+        if (selectedTab != Tab.LOCAL || !selectionMode || isBusy()) {
             return;
         }
         List<PhotoItem> selected = selectedLocalItems();
@@ -1516,7 +1637,7 @@ public final class MainActivity extends Activity {
     }
 
     private void reEnableSelectedSync() {
-        if (selectedTab != Tab.LOCAL || !selectionMode || uploading || deleting) {
+        if (selectedTab != Tab.LOCAL || !selectionMode || isBusy()) {
             return;
         }
         List<PhotoItem> selected = selectedLocalItems();
@@ -1536,7 +1657,7 @@ public final class MainActivity extends Activity {
     }
 
     private void confirmDeleteSelected() {
-        if (!selectionMode || uploading || deleting) {
+        if (!selectionMode || isBusy()) {
             return;
         }
         if (selectedTab == Tab.REMOTE) {
@@ -1573,7 +1694,7 @@ public final class MainActivity extends Activity {
     }
 
     private void confirmDeleteSynced() {
-        if (uploading || deleting) {
+        if (isBusy()) {
             return;
         }
         if (syncedLocalItems().isEmpty()) {
@@ -1584,7 +1705,7 @@ public final class MainActivity extends Activity {
     }
 
     private void confirmDeleteSyncedRange(long startMillis, long endMillis) {
-        if (uploading || deleting) {
+        if (isBusy()) {
             return;
         }
         List<PhotoItem> synced = syncedLocalItems(startMillis, endMillis);
@@ -1843,7 +1964,7 @@ public final class MainActivity extends Activity {
     }
 
     private void startUpload(SambaSettings settings, List<PhotoItem> items) {
-        if (uploading || deleting) {
+        if (isBusy()) {
             return;
         }
         uploading = true;
@@ -1986,7 +2107,7 @@ public final class MainActivity extends Activity {
     }
 
     private void enterSelectionMode(PhotoItem item) {
-        if (uploading || deleting) {
+        if (isBusy()) {
             return;
         }
         selectionMode = true;
@@ -1997,7 +2118,7 @@ public final class MainActivity extends Activity {
     }
 
     private void enterRemoteSelectionMode(RemotePhotoItem item) {
-        if (uploading || deleting) {
+        if (isBusy()) {
             return;
         }
         selectionMode = true;
@@ -2008,7 +2129,7 @@ public final class MainActivity extends Activity {
     }
 
     private void toggleLocalSelection(PhotoItem item) {
-        if (!selectionMode || uploading || deleting) {
+        if (!selectionMode || isBusy()) {
             return;
         }
         item.selected = !item.selected;
@@ -2018,7 +2139,7 @@ public final class MainActivity extends Activity {
     }
 
     private void toggleRemoteSelection(RemotePhotoItem item) {
-        if (!selectionMode || uploading || deleting) {
+        if (!selectionMode || isBusy()) {
             return;
         }
         item.selected = !item.selected;
@@ -2028,7 +2149,7 @@ public final class MainActivity extends Activity {
     }
 
     private void exitSelectionMode() {
-        if (!selectionMode || uploading || deleting) {
+        if (!selectionMode || isBusy()) {
             return;
         }
         selectionMode = false;
@@ -2125,7 +2246,7 @@ public final class MainActivity extends Activity {
         boolean localVisible = selectedTab == Tab.LOCAL;
         boolean remoteVisible = selectedTab == Tab.REMOTE;
         boolean selecting = selectionMode && (localVisible || remoteVisible);
-        boolean busy = uploading || deleting;
+        boolean busy = isBusy();
         if (sambaUploadButton != null) {
             sambaUploadButton.setVisibility(remoteVisible ? View.VISIBLE : View.GONE);
             sambaUploadButton.setEnabled(remoteVisible && !busy);
@@ -2143,7 +2264,7 @@ public final class MainActivity extends Activity {
         }
         if (selectionRowsColumn != null) {
             LinearLayout.LayoutParams rowsParams = (LinearLayout.LayoutParams) selectionRowsColumn.getLayoutParams();
-            float targetWeight = localVisible && selecting ? 2f : 1f;
+            float targetWeight = selecting ? 2f : 1f;
             if (rowsParams.weight != targetWeight) {
                 rowsParams.weight = targetWeight;
                 selectionRowsColumn.setLayoutParams(rowsParams);
@@ -2155,12 +2276,13 @@ public final class MainActivity extends Activity {
         if (noSyncRow != null) {
             noSyncRow.setVisibility(localVisible && selecting ? View.VISIBLE : View.GONE);
         }
-        if (selectAllButton == null || syncAllButton == null || deleteSyncedButton == null || uploadSelectedButton == null || noSyncButton == null || reEnableSyncButton == null || deleteSelectedButton == null || cancelSelectionButton == null) {
+        if (selectAllButton == null || syncAllButton == null || deleteSyncedButton == null || uploadSelectedButton == null || downloadSelectedButton == null || noSyncButton == null || reEnableSyncButton == null || deleteSelectedButton == null || cancelSelectionButton == null) {
             return;
         }
 
         int selected = selectedCurrentCount();
         int selectedLocal = selectedLocalCount();
+        int selectedRemote = selectedRemoteCount();
         int selectedNoSync = selectedLocalNoSyncCount();
         selectAllButton.setEnabled(localVisible && !busy && !photos.isEmpty());
         syncAllButton.setEnabled(localVisible && !busy && !photos.isEmpty());
@@ -2169,6 +2291,9 @@ public final class MainActivity extends Activity {
         uploadSelectedButton.setVisibility(localVisible && selecting ? View.VISIBLE : View.GONE);
         uploadSelectedButton.setEnabled(localVisible && selecting && !busy && selectedLocal > 0);
         uploadSelectedButton.setText(selectedLocal > 0 ? uploadCountText(selectedLocal) : t("Upload", "上传"));
+        downloadSelectedButton.setVisibility(remoteVisible && selecting ? View.VISIBLE : View.GONE);
+        downloadSelectedButton.setEnabled(remoteVisible && selecting && !busy && selectedRemote > 0);
+        downloadSelectedButton.setText(selectedRemote > 0 ? downloadCountText(selectedRemote) : t("Download", "下载"));
         noSyncButton.setVisibility(localVisible && selecting ? View.VISIBLE : View.GONE);
         noSyncButton.setEnabled(localVisible && selecting && !busy && selectedLocal > 0);
         reEnableSyncButton.setVisibility(localVisible && selecting ? View.VISIBLE : View.GONE);
@@ -2181,6 +2306,10 @@ public final class MainActivity extends Activity {
         }
         deleteSelectedButton.setEnabled(selecting && !busy && selected > 0);
         cancelSelectionButton.setEnabled(selecting && !busy);
+    }
+
+    private boolean isBusy() {
+        return uploading || downloading || deleting;
     }
 
     private void updateTabButton(Button button, boolean selected) {
@@ -2253,6 +2382,10 @@ public final class MainActivity extends Activity {
         return isChinese() ? "正在从 Samba 删除 " + done + " / " + total : "Deleting " + done + " of " + total + " from Samba";
     }
 
+    private String downloadingFromSambaText(int count) {
+        return isChinese() ? "正在从 Samba 下载 " + count + " 项" : "Downloading " + count + " from Samba";
+    }
+
     private String deletedText(int count) {
         return isChinese() ? "已删除 " + count + " 项" : "Deleted " + count;
     }
@@ -2279,6 +2412,16 @@ public final class MainActivity extends Activity {
         return isChinese() ? "上传 " + count + " 项" : "Upload " + count;
     }
 
+    private String downloadCountText(int count) {
+        return isChinese() ? "下载 " + count + " 项" : "Download " + count;
+    }
+
+    private String downloadSummaryText(int downloaded, int skipped, int failed) {
+        return isChinese()
+                ? "已下载 " + downloaded + "  已在手机上 " + skipped + "  失败 " + failed
+                : "Downloaded " + downloaded + "  Already on phone " + skipped + "  Failed " + failed;
+    }
+
     private boolean hasPhotoPermission() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return true;
@@ -2288,6 +2431,20 @@ public final class MainActivity extends Activity {
                     && checkSelfPermission(Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED;
         }
         return checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean hasDownloadPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return true;
+        }
+        return checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void requestDownloadPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return;
+        }
+        requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_DOWNLOAD_REMOTE);
     }
 
     private void requestPhotoPermission() {
