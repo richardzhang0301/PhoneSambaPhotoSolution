@@ -21,16 +21,18 @@ import java.util.Set;
 final class PhotoRepository {
     private static final String PREFS = "photo_sync_state";
     private static final String UPLOADED_KEYS = "uploaded_keys";
+    private static final String NO_SYNC_KEYS = "no_sync_keys";
 
     private PhotoRepository() {
     }
 
     static List<PhotoItem> loadPhotos(Context context, SambaSettings settings) {
         Set<String> uploadedKeys = loadUploadedKeys(context);
+        Set<String> noSyncKeys = loadNoSyncKeys(context);
         List<PhotoItem> media = new ArrayList<>();
         ContentResolver resolver = context.getContentResolver();
-        loadImages(resolver, settings, uploadedKeys, media);
-        loadVideos(resolver, settings, uploadedKeys, media);
+        loadImages(resolver, settings, uploadedKeys, noSyncKeys, media);
+        loadVideos(resolver, settings, uploadedKeys, noSyncKeys, media);
         Collections.sort(media, new Comparator<PhotoItem>() {
             @Override
             public int compare(PhotoItem left, PhotoItem right) {
@@ -47,11 +49,33 @@ final class PhotoRepository {
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         Set<String> keys = new HashSet<>(prefs.getStringSet(UPLOADED_KEYS, new HashSet<String>()));
         keys.add(uploadKey(settings, item));
-        prefs.edit().putStringSet(UPLOADED_KEYS, keys).apply();
+        Set<String> noSyncKeys = new HashSet<>(prefs.getStringSet(NO_SYNC_KEYS, new HashSet<String>()));
+        noSyncKeys.remove(noSyncKey(item));
+        prefs.edit()
+                .putStringSet(UPLOADED_KEYS, keys)
+                .putStringSet(NO_SYNC_KEYS, noSyncKeys)
+                .apply();
         item.uploaded = true;
+        item.noSync = false;
     }
 
-    private static void loadImages(ContentResolver resolver, SambaSettings settings, Set<String> uploadedKeys, List<PhotoItem> media) {
+    static int markNoSync(Context context, List<PhotoItem> items) {
+        if (items.isEmpty()) {
+            return 0;
+        }
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        Set<String> keys = new HashSet<>(prefs.getStringSet(NO_SYNC_KEYS, new HashSet<String>()));
+        int marked = 0;
+        for (PhotoItem item : items) {
+            keys.add(noSyncKey(item));
+            item.noSync = true;
+            marked++;
+        }
+        prefs.edit().putStringSet(NO_SYNC_KEYS, keys).apply();
+        return marked;
+    }
+
+    private static void loadImages(ContentResolver resolver, SambaSettings settings, Set<String> uploadedKeys, Set<String> noSyncKeys, List<PhotoItem> media) {
         Uri collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
         String[] projection;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -107,6 +131,7 @@ final class PhotoRepository {
                 long displayTime = taken > 0L ? taken : added * 1000L;
                 PhotoItem item = new PhotoItem(id, uri, name, size, modified, displayTime, false, false);
                 item.uploaded = settings.isConfigured() && uploadedKeys.contains(uploadKey(settings, item));
+                item.noSync = !item.uploaded && noSyncKeys.contains(noSyncKey(item));
                 media.add(item);
             }
         } catch (RuntimeException ignored) {
@@ -114,7 +139,7 @@ final class PhotoRepository {
         }
     }
 
-    private static void loadVideos(ContentResolver resolver, SambaSettings settings, Set<String> uploadedKeys, List<PhotoItem> media) {
+    private static void loadVideos(ContentResolver resolver, SambaSettings settings, Set<String> uploadedKeys, Set<String> noSyncKeys, List<PhotoItem> media) {
         Uri collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
         String[] projection;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -165,6 +190,7 @@ final class PhotoRepository {
                 }
                 PhotoItem item = new PhotoItem(id, uri, name, size, modified, added * 1000L, false, true);
                 item.uploaded = settings.isConfigured() && uploadedKeys.contains(uploadKey(settings, item));
+                item.noSync = !item.uploaded && noSyncKeys.contains(noSyncKey(item));
                 media.add(item);
             }
         } catch (RuntimeException ignored) {
@@ -187,7 +213,16 @@ final class PhotoRepository {
         return new HashSet<>(prefs.getStringSet(UPLOADED_KEYS, new HashSet<String>()));
     }
 
+    private static Set<String> loadNoSyncKeys(Context context) {
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        return new HashSet<>(prefs.getStringSet(NO_SYNC_KEYS, new HashSet<String>()));
+    }
+
     private static String uploadKey(SambaSettings settings, PhotoItem item) {
         return settings.identityKey() + "|" + item.mediaKey();
+    }
+
+    private static String noSyncKey(PhotoItem item) {
+        return item.mediaKey();
     }
 }

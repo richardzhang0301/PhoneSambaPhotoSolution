@@ -79,7 +79,13 @@ final class PhotoGridAdapter extends BaseAdapter {
             sambaParams.setMargins(dp(7), dp(7), 0, 0);
             item.addView(sambaCheck, sambaParams);
 
-            holder = new Holder(image, play, overlay, check, sambaCheck);
+            ImageView noSync = new ImageView(context);
+            noSync.setImageResource(R.drawable.ic_no_sync);
+            FrameLayout.LayoutParams noSyncParams = new FrameLayout.LayoutParams(dp(28), dp(28), Gravity.TOP | Gravity.START);
+            noSyncParams.setMargins(dp(7), dp(7), 0, 0);
+            item.addView(noSync, noSyncParams);
+
+            holder = new Holder(image, play, overlay, check, sambaCheck, noSync);
             item.setTag(holder);
             convertView = item;
         } else {
@@ -91,7 +97,8 @@ final class PhotoGridAdapter extends BaseAdapter {
         holder.play.setVisibility(photo.video ? View.VISIBLE : View.GONE);
         holder.overlay.setVisibility(photo.selected ? View.VISIBLE : View.GONE);
         holder.check.setVisibility(photo.selected ? View.VISIBLE : View.GONE);
-        holder.sambaCheck.setVisibility(photo.sambaExists ? View.VISIBLE : View.GONE);
+        holder.sambaCheck.setVisibility(!photo.noSync && photo.sambaExists ? View.VISIBLE : View.GONE);
+        holder.noSync.setVisibility(photo.noSync ? View.VISIBLE : View.GONE);
         return convertView;
     }
 
@@ -105,13 +112,15 @@ final class PhotoGridAdapter extends BaseAdapter {
         final View overlay;
         final ImageView check;
         final ImageView sambaCheck;
+        final ImageView noSync;
 
-        Holder(ImageView image, ImageView play, View overlay, ImageView check, ImageView sambaCheck) {
+        Holder(ImageView image, ImageView play, View overlay, ImageView check, ImageView sambaCheck, ImageView noSync) {
             this.image = image;
             this.play = play;
             this.overlay = overlay;
             this.check = check;
             this.sambaCheck = sambaCheck;
+            this.noSync = noSync;
         }
     }
 

@@ -1,7 +1,5 @@
 package com.diytools.phonesambaphoto;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -12,8 +10,6 @@ import jcifs.CIFSContext;
 import jcifs.smb.SmbFile;
 
 final class RemotePhotoRepository {
-    private static final String THUMB_DIR = ".phonesamba_thumbs";
-
     private RemotePhotoRepository() {
     }
 
@@ -45,11 +41,11 @@ final class RemotePhotoRepository {
             }
             long size = file.length();
             long modified = file.lastModified();
-            String thumbnailName = thumbnailName(name, size, modified);
+            String thumbnailName = SambaThumbnailSpec.thumbnailName(name, size, modified);
             photos.add(new RemotePhotoItem(
                     name,
                     settings.fileUrl(name),
-                    settings.childUrl(THUMB_DIR + "/" + thumbnailName),
+                    settings.childUrl(SambaThumbnailSpec.DIR + "/" + thumbnailName),
                     size,
                     modified,
                     video
@@ -63,18 +59,6 @@ final class RemotePhotoRepository {
             }
         });
         return photos;
-    }
-
-    private static String thumbnailName(String name, long size, long lastModifiedMillis) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-1");
-        String payload = name + "|" + size + "|" + lastModifiedMillis;
-        byte[] hash = digest.digest(payload.getBytes(StandardCharsets.UTF_8));
-        StringBuilder builder = new StringBuilder(hash.length * 2 + 4);
-        for (byte value : hash) {
-            builder.append(String.format(Locale.US, "%02x", value & 0xff));
-        }
-        builder.append(".jpg");
-        return builder.toString();
     }
 
     private static String cleanName(String name) {

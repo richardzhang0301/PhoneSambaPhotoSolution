@@ -86,6 +86,7 @@ public final class MainActivity extends Activity {
     private Button syncAllButton;
     private Button deleteSyncedButton;
     private Button uploadSelectedButton;
+    private Button noSyncButton;
     private Button deleteSelectedButton;
     private Button cancelSelectionButton;
     private Tab selectedTab = Tab.LOCAL;
@@ -281,6 +282,12 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams uploadParams = new LinearLayout.LayoutParams(0, dp(44), 1);
         uploadParams.setMargins(0, 0, dp(8), 0);
         buttonRow.addView(uploadSelectedButton, uploadParams);
+
+        noSyncButton = grayButton("No Sync");
+        noSyncButton.setOnClickListener(v -> markSelectedNoSync());
+        LinearLayout.LayoutParams noSyncParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+        noSyncParams.setMargins(0, 0, dp(8), 0);
+        buttonRow.addView(noSyncButton, noSyncParams);
 
         deleteSelectedButton = destructiveButton("Delete");
         deleteSelectedButton.setOnClickListener(v -> confirmDeleteSelected());
@@ -736,7 +743,7 @@ public final class MainActivity extends Activity {
     private void syncDateRange(SambaSettings settings, long startMillis, long endMillis) {
         List<PhotoItem> pending = new ArrayList<>();
         for (PhotoItem photo : photos) {
-            if (!photo.uploaded && !photo.sambaExists && isInDateRange(photo, startMillis, endMillis)) {
+            if (!photo.noSync && !photo.uploaded && !photo.sambaExists && isInDateRange(photo, startMillis, endMillis)) {
                 pending.add(photo);
             }
         }
@@ -848,6 +855,26 @@ public final class MainActivity extends Activity {
             return;
         }
         startUpload(settings, selected);
+    }
+
+    private void markSelectedNoSync() {
+        if (selectedTab != Tab.LOCAL || !selectionMode || uploading || deleting) {
+            return;
+        }
+        List<PhotoItem> selected = selectedLocalItems();
+        if (selected.isEmpty()) {
+            setStatus("Select media to mark no sync");
+            return;
+        }
+
+        int marked = PhotoRepository.markNoSync(getApplicationContext(), selected);
+        selectionMode = false;
+        clearLocalSelection();
+        if (adapter != null) {
+            adapter.notifyDataSetChanged();
+        }
+        updateButtons();
+        setStatus(marked == 1 ? "1 item marked No Sync" : marked + " items marked No Sync");
     }
 
     private void confirmDeleteSelected() {
@@ -1064,14 +1091,8 @@ public final class MainActivity extends Activity {
     }
 
     private void deleteRemoteThumbnail(CIFSContext context, RemotePhotoItem item) {
-        if (TextUtils.isEmpty(item.thumbnailUrl)) {
-            return;
-        }
         try {
-            SmbFile thumbnail = new SmbFile(item.thumbnailUrl, context);
-            if (thumbnail.exists()) {
-                thumbnail.delete();
-            }
+            SambaThumbnailStore.deleteIfPresent(context, item.thumbnailUrl);
         } catch (Exception ignored) {
             // The media file is authoritative; stale thumbnail cleanup is best effort.
         }
@@ -1164,6 +1185,7 @@ public final class MainActivity extends Activity {
                         public void onItemFinished(PhotoItem item) {
                             main.post(() -> {
                                 item.selected = false;
+                                item.noSync = false;
                                 item.sambaExists = true;
                                 adapter.notifyDataSetChanged();
                             });
@@ -1402,7 +1424,7 @@ public final class MainActivity extends Activity {
         if (buttonRow != null) {
             buttonRow.setVisibility(selecting ? View.VISIBLE : View.GONE);
         }
-        if (syncAllButton == null || deleteSyncedButton == null || uploadSelectedButton == null || deleteSelectedButton == null || cancelSelectionButton == null) {
+        if (syncAllButton == null || deleteSyncedButton == null || uploadSelectedButton == null || noSyncButton == null || deleteSelectedButton == null || cancelSelectionButton == null) {
             return;
         }
 
@@ -1414,7 +1436,9 @@ public final class MainActivity extends Activity {
         deleteSyncedButton.setEnabled(localVisible && !busy && synced > 0);
         uploadSelectedButton.setVisibility(localVisible && selecting ? View.VISIBLE : View.GONE);
         uploadSelectedButton.setEnabled(localVisible && selecting && !busy && selectedLocal > 0);
-        uploadSelectedButton.setText(selectedLocal > 0 ? "Upload " + selectedLocal : "Upload selected");
+        uploadSelectedButton.setText(selectedLocal > 0 ? "Upload " + selectedLocal : "Upload");
+        noSyncButton.setVisibility(localVisible && selecting ? View.VISIBLE : View.GONE);
+        noSyncButton.setEnabled(localVisible && selecting && !busy && selectedLocal > 0);
         deleteSelectedButton.setEnabled(selecting && !busy && selected > 0);
         cancelSelectionButton.setEnabled(selecting && !busy);
     }
@@ -1481,6 +1505,23 @@ public final class MainActivity extends Activity {
         GradientDrawable background = new GradientDrawable();
         background.setCornerRadius(dp(7));
         background.setColor(Color.rgb(190, 34, 34));
+        button.setBackground(background);
+        return button;
+    }
+
+    private Button grayButton(String text) {
+        Button button = new Button(this);
+        button.setAllCaps(false);
+        button.setText(text);
+        button.setTextSize(14);
+        button.setTextColor(Color.WHITE);
+        button.setGravity(Gravity.CENTER);
+        button.setMinHeight(0);
+        button.setMinWidth(0);
+        button.setPadding(dp(10), 0, dp(10), 0);
+        GradientDrawable background = new GradientDrawable();
+        background.setCornerRadius(dp(7));
+        background.setColor(Color.rgb(102, 110, 120));
         button.setBackground(background);
         return button;
     }

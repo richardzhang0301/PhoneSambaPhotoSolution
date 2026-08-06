@@ -2,10 +2,21 @@ package com.diytools.phonesambaphoto;
 
 import android.content.ContentResolver;
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.RectF;
+import android.os.Build;
+import android.os.CancellationSignal;
 import android.text.TextUtils;
+import android.provider.MediaStore;
+import android.util.Size;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.List;
@@ -93,6 +104,7 @@ final class SambaUploader {
     private static UploadState uploadOne(ContentResolver resolver, SambaSettings settings, CIFSContext context, PhotoItem item) throws Exception {
         SmbFile target = new SmbFile(settings.fileUrl(item.name), context);
         if (target.exists() && item.size > 0 && target.length() == item.size) {
+            uploadThumbnailBestEffort(resolver, settings, context, item, target);
             return UploadState.SKIPPED;
         }
         if (target.exists()) {
@@ -117,7 +129,151 @@ final class SambaUploader {
         if (item.dateModifiedSeconds > 0) {
             target.setLastModified(item.dateModifiedSeconds * 1000L);
         }
+        uploadThumbnailBestEffort(resolver, settings, context, item, target);
         return UploadState.UPLOADED;
+    }
+
+    private static void uploadThumbnailBestEffort(ContentResolver resolver, SambaSettings settings, CIFSContext context, PhotoItem item, SmbFile target) {
+        try {
+            Bitmap thumbnail = loadThumbnail(resolver, item);
+            if (thumbnail == null) {
+                return;
+            }
+            Bitmap prepared = prepareThumbnail(thumbnail, item.video);
+            if (prepared == null) {
+                return;
+            }
+            writeThumbnail(settings, context, target, prepared);
+        } catch (Exception ignored) {
+            // Media upload is authoritative; SambaTools can regenerate a missing thumbnail later.
+        }
+    }
+
+    private static Bitmap loadThumbnail(ContentResolver resolver, PhotoItem item) throws IOException {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return resolver.loadThumbnail(
+                    item.uri,
+                    new Size(SambaThumbnailSpec.SIZE_PX, SambaThumbnailSpec.SIZE_PX),
+                    new CancellationSignal()
+            );
+        }
+        if (item.video) {
+            return MediaStore.Video.Thumbnails.getThumbnail(
+                    resolver,
+                    item.id,
+                    MediaStore.Video.Thumbnails.MINI_KIND,
+                    null
+            );
+        }
+        return MediaStore.Images.Thumbnails.getThumbnail(
+                resolver,
+                item.id,
+                MediaStore.Images.Thumbnails.MINI_KIND,
+                null
+        );
+    }
+
+    private static Bitmap prepareThumbnail(Bitmap source, boolean video) {
+        if (source.getWidth() <= 0 || source.getHeight() <= 0) {
+            return null;
+        }
+        Bitmap scaled = scaleInside(source, SambaThumbnailSpec.SIZE_PX);
+        return video ? addPlayOverlay(scaled) : copyForJpeg(scaled);
+    }
+
+    private static Bitmap scaleInside(Bitmap source, int maxSize) {
+        int width = source.getWidth();
+        int height = source.getHeight();
+        if (width <= maxSize && height <= maxSize) {
+            return source;
+        }
+        float scale = Math.min(maxSize / (float) width, maxSize / (float) height);
+        int scaledWidth = Math.max(1, Math.round(width * scale));
+        int scaledHeight = Math.max(1, Math.round(height * scale));
+        return Bitmap.createScaledBitmap(source, scaledWidth, scaledHeight, true);
+    }
+
+    private static Bitmap copyForJpeg(Bitmap source) {
+        Bitmap result = source.copy(Bitmap.Config.ARGB_8888, false);
+        return result == null ? source : result;
+    }
+
+    private static Bitmap addPlayOverlay(Bitmap source) {
+        Bitmap result = source.copy(Bitmap.Config.ARGB_8888, true);
+        if (result == null) {
+            result = Bitmap.createBitmap(source.getWidth(), source.getHeight(), Bitmap.Config.ARGB_8888);
+            new Canvas(result).drawBitmap(source, 0, 0, null);
+        }
+
+        int width = result.getWidth();
+        int height = result.getHeight();
+        int minDim = Math.max(1, Math.min(width, height));
+        int diameter = Math.max(32, (int) (minDim * 0.42f));
+        float radius = diameter / 2f;
+        float centerX = width / 2f;
+        float centerY = height / 2f;
+
+        Canvas canvas = new Canvas(result);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setColor(Color.argb(118, 0, 0, 0));
+        canvas.drawOval(new RectF(centerX - radius, centerY - radius, centerX + radius, centerY + radius), paint);
+
+        float triangleWidth = diameter * 0.38f;
+        float triangleHeight = diameter * 0.46f;
+        float left = centerX - triangleWidth * 0.28f;
+        Path triangle = new Path();
+        triangle.moveTo(left, centerY - triangleHeight / 2f);
+        triangle.lineTo(left, centerY + triangleHeight / 2f);
+        triangle.lineTo(centerX + triangleWidth * 0.58f, centerY);
+        triangle.close();
+        paint.setColor(Color.argb(215, 255, 255, 255));
+        canvas.drawPath(triangle, paint);
+        return result;
+    }
+
+    private static void writeThumbnail(SambaSettings settings, CIFSContext context, SmbFile mediaFile, Bitmap bitmap) throws Exception {
+        String remoteName = cleanName(mediaFile.getName());
+        if (TextUtils.isEmpty(remoteName)) {
+            return;
+        }
+        long remoteSize = mediaFile.length();
+        long remoteModified = mediaFile.lastModified();
+        String thumbnailName = SambaThumbnailSpec.thumbnailName(remoteName, remoteSize, remoteModified);
+        SmbFile thumbnailDirectory = new SmbFile(settings.childUrl(SambaThumbnailSpec.DIR + "/"), context);
+        if (!thumbnailDirectory.exists()) {
+            thumbnailDirectory.mkdirs();
+        }
+
+        SmbFile thumbnail = new SmbFile(settings.childUrl(SambaThumbnailSpec.DIR + "/" + thumbnailName), context);
+        if (thumbnail.exists() && thumbnail.length() > 0) {
+            return;
+        }
+
+        String tempName = thumbnailName.substring(0, thumbnailName.length() - 4) + ".tmp";
+        SmbFile temp = new SmbFile(settings.childUrl(SambaThumbnailSpec.DIR + "/" + tempName), context);
+        if (temp.exists()) {
+            temp.delete();
+        }
+
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        if (!bitmap.compress(Bitmap.CompressFormat.JPEG, SambaThumbnailSpec.QUALITY, bytes)) {
+            return;
+        }
+        try (BufferedOutputStream output = new BufferedOutputStream(new SmbFileOutputStream(temp))) {
+            output.write(bytes.toByteArray());
+            output.flush();
+        }
+        temp.renameTo(thumbnail);
+    }
+
+    private static String cleanName(String name) {
+        if (TextUtils.isEmpty(name)) {
+            return "";
+        }
+        while (name.endsWith("/")) {
+            name = name.substring(0, name.length() - 1);
+        }
+        return name;
     }
 
     private static SmbFile findAvailableTarget(SambaSettings settings, CIFSContext context, String originalName) throws Exception {

@@ -13,6 +13,7 @@ final class PhotoItem {
     boolean selected;
     boolean uploaded;
     boolean sambaExists;
+    boolean noSync;
 
     PhotoItem(long id, Uri uri, String name, long size, long dateModifiedSeconds, long dateTakenMillis, boolean uploaded, boolean video) {
         this.id = id;

@@ -906,14 +906,8 @@ public final class RemoteMediaViewerActivity extends Activity {
     }
 
     private void deleteRemoteThumbnail(CIFSContext context) {
-        if (TextUtils.isEmpty(thumbnailUrl)) {
-            return;
-        }
         try {
-            SmbFile thumbnail = new SmbFile(thumbnailUrl, context);
-            if (thumbnail.exists()) {
-                thumbnail.delete();
-            }
+            SambaThumbnailStore.deleteIfPresent(context, thumbnailUrl);
         } catch (Exception ignored) {
             // The main file is what matters; stale thumbnail cleanup is best effort.
         }
