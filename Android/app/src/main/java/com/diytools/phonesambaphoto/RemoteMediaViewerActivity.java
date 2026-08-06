@@ -78,7 +78,7 @@ public final class RemoteMediaViewerActivity extends Activity {
     private static final String EXTRA_INDEX = "index";
     private static final int REQUEST_DELETE_LOCAL = 2001;
     private static final int REQUEST_DOWNLOAD_REMOTE = 2002;
-    private static final long REMOTE_VIDEO_INITIAL_BUFFER_MS = 30_000L;
+    private static final long REMOTE_VIDEO_INITIAL_BUFFER_MS = 5_000L;
     private static final int REMOTE_VIDEO_STARTUP_RECOVERY_LIMIT = 2;
     private static final Object NAVIGATION_LOCK = new Object();
     private static final Object MEDIA_CHANGED_LOCK = new Object();
@@ -1782,8 +1782,9 @@ public final class RemoteMediaViewerActivity extends Activity {
         private static final int COPY_BUFFER_BYTES = 256 * 1024;
         private static final long RANDOM_READ_GAP_BYTES = 8L * 1024L * 1024L;
         private static final long REBUFFER_READY_BYTES = 12L * 1024L * 1024L;
-        private static final long FALLBACK_INITIAL_READY_BYTES = 24L * 1024L * 1024L;
-        private static final long MAX_INITIAL_READY_BYTES = 64L * 1024L * 1024L;
+        private static final long MIN_INITIAL_READY_BYTES = 4L * 1024L * 1024L;
+        private static final long FALLBACK_INITIAL_READY_BYTES = 6L * 1024L * 1024L;
+        private static final long MAX_INITIAL_READY_BYTES = 12L * 1024L * 1024L;
 
         private final Object stateLock = new Object();
         private final Object randomReadLock = new Object();
@@ -2030,7 +2031,7 @@ public final class RemoteMediaViewerActivity extends Activity {
             } else {
                 target = FALLBACK_INITIAL_READY_BYTES;
             }
-            target = Math.max(REBUFFER_READY_BYTES, target);
+            target = Math.max(MIN_INITIAL_READY_BYTES, target);
             target = Math.min(MAX_INITIAL_READY_BYTES, target);
             if (length > 0L) {
                 target = Math.min(target, Math.max(1L, length - position));
