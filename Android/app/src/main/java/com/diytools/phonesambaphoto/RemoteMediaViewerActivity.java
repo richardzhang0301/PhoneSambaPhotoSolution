@@ -226,10 +226,10 @@ public final class RemoteMediaViewerActivity extends Activity {
         enterImmersiveMode();
 
         if (video) {
-            showLoading("Loading video");
+            showLoading(t("Loading video", "正在加载视频"));
             loadVideo();
         } else {
-            showLoading("Loading photo");
+            showLoading(t("Loading photo", "正在加载照片"));
             loadPhoto();
         }
     }
@@ -270,10 +270,10 @@ public final class RemoteMediaViewerActivity extends Activity {
         updateActionButtons();
         if (resultCode == RESULT_OK) {
             markMediaChanged();
-            showActionToast("Deleted");
+            showActionToast(t("Deleted", "已删除"));
             afterDeleteCurrentItem();
         } else {
-            showActionToast("Delete cancelled");
+            showActionToast(t("Delete cancelled", "已取消删除"));
         }
     }
 
@@ -296,7 +296,7 @@ public final class RemoteMediaViewerActivity extends Activity {
                 Bitmap bitmap = decodeLocalPhoto();
                 main.post(() -> showPhoto(bitmap));
             } catch (Exception exc) {
-                main.post(() -> showError("Could not open photo"));
+                main.post(() -> showError(t("Could not open photo", "无法打开照片")));
             }
         });
     }
@@ -322,9 +322,9 @@ public final class RemoteMediaViewerActivity extends Activity {
             boolean hadPreview = previewShown;
             main.post(() -> {
                 if (hadPreview) {
-                    showError("Could not load full photo");
+                    showError(t("Could not load full photo", "无法加载完整照片"));
                 } else {
-                    showError("Could not open photo");
+                    showError(t("Could not open photo", "无法打开照片"));
                 }
             });
         }
@@ -344,7 +344,7 @@ public final class RemoteMediaViewerActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
         ));
-        showLoading("Loading full photo");
+        showLoading(t("Loading full photo", "正在加载完整照片"));
         bringOverlayControlsToFront();
         enterImmersiveMode();
     }
@@ -450,7 +450,7 @@ public final class RemoteMediaViewerActivity extends Activity {
         releaseRemoteVideoPlayer();
         removeVideoViews();
         photoView = null;
-        showLoading("Opening video");
+        showLoading(t("Opening video", "正在打开视频"));
 
         remoteVideoTexture = new TextureView(this);
         remoteVideoTexture.setOpaque(true);
@@ -525,7 +525,7 @@ public final class RemoteMediaViewerActivity extends Activity {
                 main.post(() -> startRemoteVideoPlayer(surface, playableDataSource));
             } catch (Exception exc) {
                 closeRemoteDataSource(dataSource);
-                main.post(() -> showError("Could not open video"));
+            main.post(() -> showError(t("Could not open video", "无法打开视频")));
             }
         });
     }
@@ -558,13 +558,13 @@ public final class RemoteMediaViewerActivity extends Activity {
                 enterImmersiveMode();
             });
             remoteMediaPlayer.setOnErrorListener((player, what, extra) -> {
-                showError("Could not play video");
+                showError(t("Could not play video", "无法播放视频"));
                 return true;
             });
             remoteMediaPlayer.prepareAsync();
         } catch (Exception exc) {
             releaseRemoteVideoPlayer();
-            showError("Could not open video");
+            showError(t("Could not open video", "无法打开视频"));
         }
     }
 
@@ -597,7 +597,7 @@ public final class RemoteMediaViewerActivity extends Activity {
             enterImmersiveMode();
         });
         videoView.setOnErrorListener((player, what, extra) -> {
-            showError("Could not play video");
+            showError(t("Could not play video", "无法播放视频"));
             return true;
         });
         videoView.requestFocus();
@@ -779,7 +779,7 @@ public final class RemoteMediaViewerActivity extends Activity {
         }
         SambaSettings settings = SambaSettings.load(this);
         if (!settings.isConfigured()) {
-            showActionToast("Set Samba folder first");
+            showActionToast(t("Set Samba folder first", "请先设置 Samba 文件夹"));
             return;
         }
 
@@ -787,7 +787,7 @@ public final class RemoteMediaViewerActivity extends Activity {
         item.add(currentLocalPhotoItem());
         actionInProgress = true;
         updateActionButtons();
-        showLoading("Uploading");
+        showLoading(t("Uploading", "正在上传"));
 
         executor.execute(() -> {
             SambaUploader.Summary summary = SambaUploader.upload(
@@ -815,9 +815,9 @@ public final class RemoteMediaViewerActivity extends Activity {
                     if (uploadButton != null) {
                         uploadButton.setEnabled(false);
                     }
-                    showActionToast(summary.skipped > 0 ? "Already synced" : "Upload complete");
+                    showActionToast(summary.skipped > 0 ? t("Already synced", "已同步") : t("Upload complete", "上传完成"));
                 } else {
-                    showActionToast("Upload failed");
+                    showActionToast(t("Upload failed", "上传失败"));
                 }
                 bringOverlayControlsToFront();
             });
@@ -835,7 +835,7 @@ public final class RemoteMediaViewerActivity extends Activity {
         long modifiedSeconds = modified > 0L ? modified / 1000L : 0L;
         String itemName = TextUtils.isEmpty(name) ? uri.getLastPathSegment() : name;
         if (TextUtils.isEmpty(itemName)) {
-            itemName = video ? "video" : "photo";
+            itemName = video ? t("video", "视频") : t("photo", "照片");
         }
         return new PhotoItem(id, uri, itemName, size, modifiedSeconds, modified, false, video);
     }
@@ -844,14 +844,16 @@ public final class RemoteMediaViewerActivity extends Activity {
         if (actionInProgress) {
             return;
         }
-        String mediaName = TextUtils.isEmpty(name) ? "this media" : "\"" + name + "\"";
-        String title = isRemote() ? "Delete from Samba?" : "Delete from phone?";
-        String source = isRemote() ? "Samba" : "this phone";
+        String mediaName = TextUtils.isEmpty(name) ? t("this media", "此媒体") : "\"" + name + "\"";
+        String title = isRemote() ? t("Delete from Samba?", "从 Samba 删除？") : t("Delete from phone?", "从手机删除？");
+        String source = isRemote() ? "Samba" : t("this phone", "手机");
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle(title)
-                .setMessage("Delete " + mediaName + " from " + source + "? This cannot be undone.")
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Delete", (d, which) -> deleteCurrentItem())
+                .setMessage(isChinese()
+                        ? "要从" + source + "删除" + mediaName + "吗？此操作无法撤销。"
+                        : "Delete " + mediaName + " from " + source + "? This cannot be undone.")
+                .setNegativeButton(t("Cancel", "取消"), null)
+                .setPositiveButton(t("Delete", "删除"), (d, which) -> deleteCurrentItem())
                 .create();
         dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(Color.rgb(190, 34, 34)));
         dialog.show();
@@ -867,13 +869,13 @@ public final class RemoteMediaViewerActivity extends Activity {
 
     private void deleteRemoteCurrentItem() {
         if (TextUtils.isEmpty(url)) {
-            showActionToast("Nothing to delete");
+            showActionToast(t("Nothing to delete", "没有可删除的内容"));
             return;
         }
         stopCurrentPlaybackForAction();
         actionInProgress = true;
         updateActionButtons();
-        showLoading("Deleting");
+        showLoading(t("Deleting", "正在删除"));
 
         executor.execute(() -> {
             boolean deleted = false;
@@ -895,10 +897,10 @@ public final class RemoteMediaViewerActivity extends Activity {
                 updateActionButtons();
                 if (success) {
                     markMediaChanged();
-                    showActionToast("Deleted");
+                    showActionToast(t("Deleted", "已删除"));
                     afterDeleteCurrentItem();
                 } else {
-                    showActionToast("Delete failed");
+                    showActionToast(t("Delete failed", "删除失败"));
                     bringOverlayControlsToFront();
                 }
             });
@@ -915,7 +917,7 @@ public final class RemoteMediaViewerActivity extends Activity {
 
     private void deleteLocalCurrentItem() {
         if (TextUtils.isEmpty(uriString)) {
-            showActionToast("Nothing to delete");
+            showActionToast(t("Nothing to delete", "没有可删除的内容"));
             return;
         }
         stopCurrentPlaybackForAction();
@@ -934,10 +936,10 @@ public final class RemoteMediaViewerActivity extends Activity {
             updateActionButtons();
             if (deleted > 0) {
                 markMediaChanged();
-                showActionToast("Deleted");
+                showActionToast(t("Deleted", "已删除"));
                 afterDeleteCurrentItem();
             } else {
-                showActionToast("Delete failed");
+                showActionToast(t("Delete failed", "删除失败"));
             }
         } catch (SecurityException exc) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && exc instanceof RecoverableSecurityException) {
@@ -945,7 +947,7 @@ public final class RemoteMediaViewerActivity extends Activity {
             } else {
                 actionInProgress = false;
                 updateActionButtons();
-                showActionToast("Delete not allowed");
+                showActionToast(t("Delete not allowed", "不允许删除"));
             }
         }
     }
@@ -957,7 +959,7 @@ public final class RemoteMediaViewerActivity extends Activity {
         } catch (IntentSender.SendIntentException | RuntimeException exc) {
             actionInProgress = false;
             updateActionButtons();
-            showActionToast("Delete not allowed");
+            showActionToast(t("Delete not allowed", "不允许删除"));
         }
     }
 
@@ -968,7 +970,7 @@ public final class RemoteMediaViewerActivity extends Activity {
         } catch (IntentSender.SendIntentException | RuntimeException sendExc) {
             actionInProgress = false;
             updateActionButtons();
-            showActionToast("Delete not allowed");
+            showActionToast(t("Delete not allowed", "不允许删除"));
         }
     }
 
@@ -1017,10 +1019,18 @@ public final class RemoteMediaViewerActivity extends Activity {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
     }
 
+    private String t(String english, String chinese) {
+        return UiText.text(this, english, chinese);
+    }
+
+    private boolean isChinese() {
+        return UiText.isChinese(this);
+    }
+
     private void addBackButton() {
         backButton = new ImageButton(this);
         backButton.setImageResource(R.drawable.ic_arrow_back);
-        backButton.setContentDescription("Back");
+        backButton.setContentDescription(t("Back", "返回"));
         backButton.setScaleType(ImageView.ScaleType.CENTER);
         backButton.setPadding(dp(12), dp(12), dp(12), dp(12));
         GradientDrawable background = new GradientDrawable();
@@ -1041,18 +1051,18 @@ public final class RemoteMediaViewerActivity extends Activity {
 
         if (isRemote()) {
             actionBar.addView(new View(this), new LinearLayout.LayoutParams(0, dp(44), 1));
-            deleteButton = actionButton("Delete", true);
+            deleteButton = actionButton(t("Delete", "删除"), true);
             deleteButton.setOnClickListener(view -> confirmDeleteCurrentItem());
             actionBar.addView(deleteButton, new LinearLayout.LayoutParams(0, dp(44), 1));
             actionBar.addView(new View(this), new LinearLayout.LayoutParams(0, dp(44), 1));
         } else {
-            uploadButton = actionButton("Upload", false);
+            uploadButton = actionButton(t("Upload", "上传"), false);
             uploadButton.setOnClickListener(view -> uploadLocalCurrentItem());
             LinearLayout.LayoutParams uploadParams = new LinearLayout.LayoutParams(0, dp(44), 1);
             uploadParams.setMargins(0, 0, dp(8), 0);
             actionBar.addView(uploadButton, uploadParams);
 
-            deleteButton = actionButton("Delete", true);
+            deleteButton = actionButton(t("Delete", "删除"), true);
             deleteButton.setOnClickListener(view -> confirmDeleteCurrentItem());
             actionBar.addView(deleteButton, new LinearLayout.LayoutParams(0, dp(44), 1));
         }

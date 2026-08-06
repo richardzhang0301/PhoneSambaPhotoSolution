@@ -75,6 +75,24 @@ final class PhotoRepository {
         return marked;
     }
 
+    static int clearNoSync(Context context, List<PhotoItem> items) {
+        if (items.isEmpty()) {
+            return 0;
+        }
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        Set<String> keys = new HashSet<>(prefs.getStringSet(NO_SYNC_KEYS, new HashSet<String>()));
+        int cleared = 0;
+        for (PhotoItem item : items) {
+            boolean wasNoSync = item.noSync;
+            if (keys.remove(noSyncKey(item)) || wasNoSync) {
+                cleared++;
+            }
+            item.noSync = false;
+        }
+        prefs.edit().putStringSet(NO_SYNC_KEYS, keys).apply();
+        return cleared;
+    }
+
     private static void loadImages(ContentResolver resolver, SambaSettings settings, Set<String> uploadedKeys, Set<String> noSyncKeys, List<PhotoItem> media) {
         Uri collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
         String[] projection;

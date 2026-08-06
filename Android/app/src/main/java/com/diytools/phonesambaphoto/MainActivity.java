@@ -77,6 +77,7 @@ public final class MainActivity extends Activity {
     private GridView localGrid;
     private GridView remoteGrid;
     private LinearLayout buttonRow;
+    private LinearLayout noSyncRow;
     private LinearLayout localActionRow;
     private TextView status;
     private TextView destination;
@@ -87,6 +88,7 @@ public final class MainActivity extends Activity {
     private Button deleteSyncedButton;
     private Button uploadSelectedButton;
     private Button noSyncButton;
+    private Button reEnableSyncButton;
     private Button deleteSelectedButton;
     private Button cancelSelectionButton;
     private Tab selectedTab = Tab.LOCAL;
@@ -179,7 +181,7 @@ public final class MainActivity extends Activity {
         if (requestCode == REQUEST_IMAGES && hasPhotoPermission()) {
             loadPhotos();
         } else if (selectedTab == Tab.LOCAL) {
-            setStatus("Media permission is needed to show the gallery");
+            setStatus(t("Media permission is needed to show the gallery", "需要媒体权限才能显示图库"));
         }
     }
 
@@ -190,7 +192,7 @@ public final class MainActivity extends Activity {
             return;
         }
         if (resultCode != RESULT_OK) {
-            finishDeleteSelected(false, 0, "Delete cancelled");
+            finishDeleteSelected(false, 0, t("Delete cancelled", "已取消删除"));
             return;
         }
         if (retryDeleteAfterPermission) {
@@ -198,7 +200,7 @@ public final class MainActivity extends Activity {
             deleteSelectedDirect(new ArrayList<>(pendingDeleteItems));
             return;
         }
-        finishDeleteSelected(true, pendingDeleteItems.size(), "Deleted " + pendingDeleteItems.size());
+        finishDeleteSelected(true, pendingDeleteItems.size(), deletedText(pendingDeleteItems.size()));
     }
 
     private View createContentView() {
@@ -213,17 +215,17 @@ public final class MainActivity extends Activity {
         toolbar.setBackgroundColor(getColorCompat(R.color.panel));
 
         TextView title = new TextView(this);
-        title.setText("Photos");
+        title.setText(t("Photos", "照片"));
         title.setTextColor(getColorCompat(R.color.ink));
         title.setTextSize(20);
         title.setGravity(Gravity.CENTER_VERTICAL);
         toolbar.addView(title, new LinearLayout.LayoutParams(0, dp(48), 1));
 
-        ImageButton refreshButton = iconButton(R.drawable.ic_refresh, "Refresh");
+        ImageButton refreshButton = iconButton(R.drawable.ic_refresh, t("Refresh", "刷新"));
         refreshButton.setOnClickListener(v -> refreshCurrentTab());
         toolbar.addView(refreshButton, new LinearLayout.LayoutParams(dp(44), dp(44)));
 
-        ImageButton settingsButton = iconButton(R.drawable.ic_settings, "Samba folder");
+        ImageButton settingsButton = iconButton(R.drawable.ic_settings, t("Samba folder", "Samba 文件夹"));
         settingsButton.setOnClickListener(v -> showSettingsDialog());
         toolbar.addView(settingsButton, new LinearLayout.LayoutParams(dp(44), dp(44)));
         root.addView(toolbar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(66)));
@@ -233,7 +235,7 @@ public final class MainActivity extends Activity {
         tabs.setPadding(dp(12), 0, dp(12), dp(8));
         tabs.setBackgroundColor(getColorCompat(R.color.panel));
 
-        localTabButton = tabButton("Local");
+        localTabButton = tabButton(t("Local", "本地"));
         localTabButton.setOnClickListener(v -> selectTab(Tab.LOCAL));
         LinearLayout.LayoutParams localTabParams = new LinearLayout.LayoutParams(0, dp(40), 1);
         localTabParams.setMargins(0, 0, dp(8), 0);
@@ -263,42 +265,50 @@ public final class MainActivity extends Activity {
         localActionRow = new LinearLayout(this);
         localActionRow.setGravity(Gravity.CENTER_VERTICAL);
 
-        syncAllButton = primaryButton("Sync", R.drawable.ic_sync);
+        syncAllButton = primaryButton(t("Sync all", "全部同步"), R.drawable.ic_sync);
         syncAllButton.setOnClickListener(v -> syncAll());
         LinearLayout.LayoutParams syncParams = new LinearLayout.LayoutParams(0, dp(44), 1);
         syncParams.setMargins(0, 0, dp(8), 0);
         localActionRow.addView(syncAllButton, syncParams);
 
-        deleteSyncedButton = destructiveButton("Delete all synced");
+        deleteSyncedButton = destructiveButton(t("Delete all synced", "删除已同步"));
         deleteSyncedButton.setOnClickListener(v -> confirmDeleteSynced());
-        localActionRow.addView(deleteSyncedButton, new LinearLayout.LayoutParams(0, dp(44), 2));
+        localActionRow.addView(deleteSyncedButton, new LinearLayout.LayoutParams(0, dp(44), 1));
         actions.addView(localActionRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
 
         buttonRow = new LinearLayout(this);
         buttonRow.setGravity(Gravity.CENTER_VERTICAL);
 
-        uploadSelectedButton = secondaryButton("Upload selected", R.drawable.ic_upload);
+        uploadSelectedButton = secondaryButton(t("Upload selected", "上传所选"), R.drawable.ic_upload);
         uploadSelectedButton.setOnClickListener(v -> uploadSelected());
         LinearLayout.LayoutParams uploadParams = new LinearLayout.LayoutParams(0, dp(44), 1);
         uploadParams.setMargins(0, 0, dp(8), 0);
         buttonRow.addView(uploadSelectedButton, uploadParams);
 
-        noSyncButton = grayButton("No Sync");
-        noSyncButton.setOnClickListener(v -> markSelectedNoSync());
-        LinearLayout.LayoutParams noSyncParams = new LinearLayout.LayoutParams(0, dp(44), 1);
-        noSyncParams.setMargins(0, 0, dp(8), 0);
-        buttonRow.addView(noSyncButton, noSyncParams);
-
-        deleteSelectedButton = destructiveButton("Delete");
+        deleteSelectedButton = destructiveButton(t("Delete", "删除"));
         deleteSelectedButton.setOnClickListener(v -> confirmDeleteSelected());
         LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(0, dp(44), 1);
         deleteParams.setMargins(0, 0, dp(8), 0);
         buttonRow.addView(deleteSelectedButton, deleteParams);
 
-        cancelSelectionButton = secondaryButton("Done", R.drawable.ic_close);
+        cancelSelectionButton = secondaryButton(t("Done", "完成"), R.drawable.ic_close);
         cancelSelectionButton.setOnClickListener(v -> exitSelectionMode());
         buttonRow.addView(cancelSelectionButton, new LinearLayout.LayoutParams(0, dp(44), 1));
         actions.addView(buttonRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+
+        noSyncRow = new LinearLayout(this);
+        noSyncRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        noSyncButton = grayButton(t("No Sync", "不同步"));
+        noSyncButton.setOnClickListener(v -> markSelectedNoSync());
+        LinearLayout.LayoutParams noSyncParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+        noSyncParams.setMargins(0, 0, dp(8), 0);
+        noSyncRow.addView(noSyncButton, noSyncParams);
+
+        reEnableSyncButton = successButton(t("Re-enable Sync", "重新启用同步"));
+        reEnableSyncButton.setOnClickListener(v -> reEnableSelectedSync());
+        noSyncRow.addView(reEnableSyncButton, new LinearLayout.LayoutParams(0, dp(44), 1));
+        actions.addView(noSyncRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
 
         status = new TextView(this);
         status.setTextColor(getColorCompat(R.color.muted));
@@ -323,7 +333,7 @@ public final class MainActivity extends Activity {
 
         updateDestinationLabel();
         updateButtons();
-        setStatus("Ready");
+        setStatus(t("Ready", "就绪"));
         return root;
     }
 
@@ -422,14 +432,14 @@ public final class MainActivity extends Activity {
                 if (remoteAdapter != null) {
                     remoteAdapter.notifyDataSetChanged();
                 }
-                setStatus("Set Samba folder to view remote media files");
+                setStatus(t("Set Samba folder to view remote media files", "请设置 Samba 文件夹以查看远程媒体"));
                 showSettingsDialog();
                 return;
             }
             if (!remoteLoaded || !settings.identityKey().equals(remoteLoadedIdentity)) {
                 loadRemotePhotos();
             } else {
-                setStatus(remotePhotos.isEmpty() ? "No remote media found" : remotePhotos.size() + " remote media files");
+                setStatus(remoteMediaStatus(remotePhotos.size()));
             }
         }
     }
@@ -455,7 +465,7 @@ public final class MainActivity extends Activity {
             return;
         }
         if (selectedTab == Tab.LOCAL) {
-            setStatus("Scanning media");
+            setStatus(t("Scanning media", "正在扫描媒体"));
         }
         scanExecutor.execute(() -> {
             SambaSettings settings = SambaSettings.load(getApplicationContext());
@@ -504,7 +514,7 @@ public final class MainActivity extends Activity {
             if (remoteAdapter != null) {
                 remoteAdapter.notifyDataSetChanged();
             }
-            setStatus("Set Samba folder to view remote media files");
+            setStatus(t("Set Samba folder to view remote media files", "请设置 Samba 文件夹以查看远程媒体"));
             return;
         }
 
@@ -514,7 +524,7 @@ public final class MainActivity extends Activity {
             remoteAdapter.notifyDataSetChanged();
         }
         updateButtons();
-        setStatus("Scanning Samba folder");
+        setStatus(t("Scanning Samba folder", "正在扫描 Samba 文件夹"));
         remoteExecutor.execute(() -> {
             try {
                 List<RemotePhotoItem> loaded = RemotePhotoRepository.loadPhotos(settings);
@@ -530,7 +540,7 @@ public final class MainActivity extends Activity {
                         adapter.notifyDataSetChanged();
                     }
                     if (selectedTab == Tab.REMOTE) {
-                        setStatus(loaded.isEmpty() ? "No remote media found" : loaded.size() + " remote media files");
+                        setStatus(remoteMediaStatus(loaded.size()));
                     }
                     updateButtons();
                 });
@@ -544,7 +554,7 @@ public final class MainActivity extends Activity {
                         adapter.notifyDataSetChanged();
                     }
                     if (selectedTab == Tab.REMOTE) {
-                        setStatus("Cannot read Samba folder");
+                        setStatus(t("Cannot read Samba folder", "无法读取 Samba 文件夹"));
                     }
                     updateButtons();
                 });
@@ -658,11 +668,11 @@ public final class MainActivity extends Activity {
 
         RadioGroup presets = new RadioGroup(this);
         presets.setOrientation(RadioGroup.VERTICAL);
-        presets.addView(rangeRadioButton(todayId, "Today"));
-        presets.addView(rangeRadioButton(weekId, "Past Week"));
-        presets.addView(rangeRadioButton(monthId, "Past Month"));
-        presets.addView(rangeRadioButton(yearId, "Past Year"));
-        presets.addView(rangeRadioButton(customId, "Custom Range"));
+        presets.addView(rangeRadioButton(todayId, t("Today", "今天")));
+        presets.addView(rangeRadioButton(weekId, t("Past Week", "过去一周")));
+        presets.addView(rangeRadioButton(monthId, t("Past Month", "过去一个月")));
+        presets.addView(rangeRadioButton(yearId, t("Past Year", "过去一年")));
+        presets.addView(rangeRadioButton(customId, t("Custom Range", "自定义范围")));
         form.addView(presets, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout dateRow = new LinearLayout(this);
@@ -684,8 +694,8 @@ public final class MainActivity extends Activity {
         form.addView(rangeMessage, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(28)));
 
         Runnable refreshDates = () -> {
-            startButton.setText("Start  " + formatDate(startDate[0]));
-            endButton.setText("End  " + formatDate(endDate[0]));
+            startButton.setText(t("Start  ", "开始  ") + formatDate(startDate[0]));
+            endButton.setText(t("End  ", "结束  ") + formatDate(endDate[0]));
             boolean custom = presets.getCheckedRadioButtonId() == customId;
             startButton.setEnabled(custom);
             endButton.setEnabled(custom);
@@ -703,10 +713,10 @@ public final class MainActivity extends Activity {
         });
 
         AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Sync date range")
+                .setTitle(t("Sync date range", "同步日期范围"))
                 .setView(form)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("OK", null)
+                .setNegativeButton(t("Cancel", "取消"), null)
+                .setPositiveButton(t("OK", "确定"), null)
                 .create();
         dialog.setOnShowListener(d -> {
             Button ok = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
@@ -714,7 +724,7 @@ public final class MainActivity extends Activity {
                 long startMillis = startDate[0].getTimeInMillis();
                 long endMillis = endDate[0].getTimeInMillis();
                 if (startMillis > endMillis) {
-                    rangeMessage.setText("Start date must be before end date");
+                    rangeMessage.setText(t("Start date must be before end date", "开始日期必须早于结束日期"));
                     return;
                 }
                 dialog.dismiss();
@@ -748,7 +758,7 @@ public final class MainActivity extends Activity {
             }
         }
         if (pending.isEmpty()) {
-            setStatus("No media to sync in date range");
+            setStatus(t("No media to sync in date range", "该日期范围内没有可同步的媒体"));
             return;
         }
         startUpload(settings, pending);
@@ -851,7 +861,7 @@ public final class MainActivity extends Activity {
         }
         List<PhotoItem> selected = selectedLocalItems();
         if (selected.isEmpty()) {
-            setStatus("Select media to upload");
+            setStatus(t("Select media to upload", "请选择要上传的媒体"));
             return;
         }
         startUpload(settings, selected);
@@ -863,7 +873,7 @@ public final class MainActivity extends Activity {
         }
         List<PhotoItem> selected = selectedLocalItems();
         if (selected.isEmpty()) {
-            setStatus("Select media to mark no sync");
+            setStatus(t("Select media to mark no sync", "请选择要标记为不同步的媒体"));
             return;
         }
 
@@ -874,7 +884,27 @@ public final class MainActivity extends Activity {
             adapter.notifyDataSetChanged();
         }
         updateButtons();
-        setStatus(marked == 1 ? "1 item marked No Sync" : marked + " items marked No Sync");
+        setStatus(markedNoSyncText(marked));
+    }
+
+    private void reEnableSelectedSync() {
+        if (selectedTab != Tab.LOCAL || !selectionMode || uploading || deleting) {
+            return;
+        }
+        List<PhotoItem> selected = selectedLocalItems();
+        if (selected.isEmpty()) {
+            setStatus(t("Select media to re-enable sync", "请选择要重新启用同步的媒体"));
+            return;
+        }
+
+        int cleared = PhotoRepository.clearNoSync(getApplicationContext(), selected);
+        selectionMode = false;
+        clearLocalSelection();
+        if (adapter != null) {
+            adapter.notifyDataSetChanged();
+        }
+        updateButtons();
+        setStatus(reEnabledSyncText(cleared));
     }
 
     private void confirmDeleteSelected() {
@@ -887,16 +917,18 @@ public final class MainActivity extends Activity {
         }
         List<PhotoItem> selected = selectedLocalItems();
         if (selected.isEmpty()) {
-            setStatus("Select media to delete");
+            setStatus(t("Select media to delete", "请选择要删除的媒体"));
             return;
         }
 
-        String countLabel = selected.size() == 1 ? "1 selected item" : selected.size() + " selected items";
+        String countLabel = selectedItemLabel(selected.size());
         AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Delete selected?")
-                .setMessage("Delete " + countLabel + " from this phone? This cannot be undone.")
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Delete", (d, which) -> deleteSelected(selected))
+                .setTitle(t("Delete selected?", "删除所选项目？"))
+                .setMessage(isChinese()
+                        ? "要从手机删除" + countLabel + "吗？此操作无法撤销。"
+                        : "Delete " + countLabel + " from this phone? This cannot be undone.")
+                .setNegativeButton(t("Cancel", "取消"), null)
+                .setPositiveButton(t("Delete", "删除"), (d, which) -> deleteSelected(selected))
                 .create();
         dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(Color.rgb(190, 34, 34)));
         dialog.show();
@@ -918,16 +950,18 @@ public final class MainActivity extends Activity {
         }
         List<PhotoItem> synced = syncedLocalItems();
         if (synced.isEmpty()) {
-            setStatus("No synced media to delete");
+            setStatus(t("No synced media to delete", "没有可删除的已同步媒体"));
             return;
         }
 
-        String countLabel = synced.size() == 1 ? "1 synced item" : synced.size() + " synced items";
+        String countLabel = syncedItemLabel(synced.size());
         AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Delete synced media?")
-                .setMessage("Delete " + countLabel + " from this phone? They will remain in Samba. This cannot be undone.")
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Delete", (d, which) -> deleteSelected(synced))
+                .setTitle(t("Delete synced media?", "删除已同步媒体？"))
+                .setMessage(isChinese()
+                        ? "要从手机删除" + countLabel + "吗？它们仍会保留在 Samba 中。此操作无法撤销。"
+                        : "Delete " + countLabel + " from this phone? They will remain in Samba. This cannot be undone.")
+                .setNegativeButton(t("Cancel", "取消"), null)
+                .setPositiveButton(t("Delete", "删除"), (d, which) -> deleteSelected(synced))
                 .create();
         dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(Color.rgb(190, 34, 34)));
         dialog.show();
@@ -946,16 +980,18 @@ public final class MainActivity extends Activity {
     private void confirmDeleteRemoteSelected() {
         List<RemotePhotoItem> selected = selectedRemoteItems();
         if (selected.isEmpty()) {
-            setStatus("Select Samba media to delete");
+            setStatus(t("Select Samba media to delete", "请选择要从 Samba 删除的媒体"));
             return;
         }
 
-        String countLabel = selected.size() == 1 ? "1 selected item" : selected.size() + " selected items";
+        String countLabel = selectedItemLabel(selected.size());
         AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Delete from Samba?")
-                .setMessage("Delete " + countLabel + " from Samba? This cannot be undone.")
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Delete", (d, which) -> deleteRemoteSelected(selected))
+                .setTitle(t("Delete from Samba?", "从 Samba 删除？"))
+                .setMessage(isChinese()
+                        ? "要从 Samba 删除" + countLabel + "吗？此操作无法撤销。"
+                        : "Delete " + countLabel + " from Samba? This cannot be undone.")
+                .setNegativeButton(t("Cancel", "取消"), null)
+                .setPositiveButton(t("Delete", "删除"), (d, which) -> deleteRemoteSelected(selected))
                 .create();
         dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(Color.rgb(190, 34, 34)));
         dialog.show();
@@ -973,7 +1009,7 @@ public final class MainActivity extends Activity {
 
     private void deleteSelected(List<PhotoItem> selected) {
         if (selected.isEmpty()) {
-            setStatus("Select media to delete");
+            setStatus(t("Select media to delete", "请选择要删除的媒体"));
             return;
         }
         deleting = true;
@@ -984,7 +1020,7 @@ public final class MainActivity extends Activity {
         progress.setMax(Math.max(1, selected.size()));
         progress.setProgress(0);
         progress.setVisibility(View.VISIBLE);
-        setStatus("Deleting " + selected.size());
+        setStatus(deletingText(selected.size()));
         updateButtons();
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -1003,7 +1039,7 @@ public final class MainActivity extends Activity {
             PendingIntent deleteRequest = MediaStore.createDeleteRequest(getContentResolver(), uris);
             startIntentSenderForResult(deleteRequest.getIntentSender(), REQUEST_DELETE_SELECTED, null, 0, 0, 0);
         } catch (IntentSender.SendIntentException | RuntimeException exc) {
-            finishDeleteSelected(false, 0, "Delete not allowed");
+            finishDeleteSelected(false, 0, t("Delete not allowed", "不允许删除"));
         }
     }
 
@@ -1019,7 +1055,7 @@ public final class MainActivity extends Activity {
                     int done = index + 1;
                     main.post(() -> {
                         progress.setProgress(done);
-                        setStatus("Deleting " + done + " of " + selected.size());
+                        setStatus(deletingProgressText(done, selected.size()));
                     });
                 } catch (SecurityException exc) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && exc instanceof RecoverableSecurityException) {
@@ -1034,13 +1070,13 @@ public final class MainActivity extends Activity {
                 }
             }
             int deletedTotal = deleted;
-            main.post(() -> finishDeleteSelected(deletedTotal > 0, deletedTotal, deletedTotal == 0 ? "Delete failed" : "Deleted " + deletedTotal));
+            main.post(() -> finishDeleteSelected(deletedTotal > 0, deletedTotal, deletedTotal == 0 ? t("Delete failed", "删除失败") : deletedText(deletedTotal)));
         });
     }
 
     private void deleteRemoteSelected(List<RemotePhotoItem> selected) {
         if (selected.isEmpty()) {
-            setStatus("Select Samba media to delete");
+            setStatus(t("Select Samba media to delete", "请选择要从 Samba 删除的媒体"));
             return;
         }
         SambaSettings settings = SambaSettings.load(this);
@@ -1054,7 +1090,7 @@ public final class MainActivity extends Activity {
         progress.setMax(Math.max(1, selected.size()));
         progress.setProgress(0);
         progress.setVisibility(View.VISIBLE);
-        setStatus("Deleting " + selected.size() + " from Samba");
+        setStatus(deletingFromSambaText(selected.size()));
         updateButtons();
 
         remoteExecutor.execute(() -> {
@@ -1078,7 +1114,7 @@ public final class MainActivity extends Activity {
                     int done = index + 1;
                     main.post(() -> {
                         progress.setProgress(done);
-                        setStatus("Deleting " + done + " of " + total + " from Samba");
+                        setStatus(deletingFromSambaProgressText(done, total));
                     });
                 }
             } catch (Exception ignored) {
@@ -1115,13 +1151,13 @@ public final class MainActivity extends Activity {
                 remoteThumbLoader.clear();
             }
             String message = failedCount > 0
-                    ? "Deleted " + deletedCount + "  Failed " + failedCount
-                    : "Deleted " + deletedCount;
+                    ? deletedFailedText(deletedCount, failedCount)
+                    : deletedText(deletedCount);
             Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
             setStatus(message);
             loadRemotePhotos();
         } else {
-            setStatus(failedCount > 0 ? "Delete failed" : "Nothing deleted");
+            setStatus(failedCount > 0 ? t("Delete failed", "删除失败") : t("Nothing deleted", "未删除任何内容"));
         }
     }
 
@@ -1130,13 +1166,13 @@ public final class MainActivity extends Activity {
         pendingDeleteItems.addAll(remaining);
         retryDeleteAfterPermission = true;
         if (deletedSoFar > 0) {
-            setStatus("Deleted " + deletedSoFar + "; waiting for permission");
+            setStatus(deletedWaitingPermissionText(deletedSoFar));
         }
         try {
             PendingIntent actionIntent = exc.getUserAction().getActionIntent();
             startIntentSenderForResult(actionIntent.getIntentSender(), REQUEST_DELETE_SELECTED, null, 0, 0, 0);
         } catch (IntentSender.SendIntentException | RuntimeException sendExc) {
-            finishDeleteSelected(deletedSoFar > 0, deletedSoFar, deletedSoFar > 0 ? "Deleted " + deletedSoFar : "Delete not allowed");
+            finishDeleteSelected(deletedSoFar > 0, deletedSoFar, deletedSoFar > 0 ? deletedText(deletedSoFar) : t("Delete not allowed", "不允许删除"));
         }
     }
 
@@ -1201,7 +1237,7 @@ public final class MainActivity extends Activity {
                 clearLocalSelection();
                 adapter.notifyDataSetChanged();
                 updateButtons();
-                setStatus("Uploaded " + summary.uploaded + "  Skipped " + summary.skipped + "  Failed " + summary.failed);
+                setStatus(uploadSummaryText(summary.uploaded, summary.skipped, summary.failed));
             });
         });
     }
@@ -1213,12 +1249,12 @@ public final class MainActivity extends Activity {
         int pad = dp(18);
         form.setPadding(pad, dp(8), pad, 0);
 
-        EditText host = field("Host or IP", current.host, false);
-        EditText share = field("Share", current.share, false);
-        EditText folder = field("Folder", current.folder, false);
-        EditText domain = field("Domain", current.domain, false);
-        EditText username = field("Username", current.username, false);
-        EditText password = field("Password", current.password, true);
+        EditText host = field(t("Host or IP", "主机名或 IP"), current.host, false);
+        EditText share = field(t("Share", "共享名"), current.share, false);
+        EditText folder = field(t("Folder", "文件夹"), current.folder, false);
+        EditText domain = field(t("Domain", "域"), current.domain, false);
+        EditText username = field(t("Username", "用户名"), current.username, false);
+        EditText password = field(t("Password", "密码"), current.password, true);
 
         form.addView(host);
         form.addView(share);
@@ -1228,10 +1264,10 @@ public final class MainActivity extends Activity {
         form.addView(password);
 
         AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Samba folder")
+                .setTitle(t("Samba folder", "Samba 文件夹"))
                 .setView(form)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Save", null)
+                .setNegativeButton(t("Cancel", "取消"), null)
+                .setPositiveButton(t("Save", "保存"), null)
                 .create();
         dialog.setOnShowListener(d -> {
             Button save = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
@@ -1245,11 +1281,11 @@ public final class MainActivity extends Activity {
                         password.getText().toString()
                 );
                 if (TextUtils.isEmpty(next.host)) {
-                    host.setError("Required");
+                    host.setError(t("Required", "必填"));
                     return;
                 }
                 if (TextUtils.isEmpty(next.share)) {
-                    share.setError("Required");
+                    share.setError(t("Required", "必填"));
                     return;
                 }
                 next.save(this);
@@ -1288,7 +1324,10 @@ public final class MainActivity extends Activity {
     }
 
     private void updateDestinationLabel() {
-        destination.setText(SambaSettings.load(this).displayName());
+        SambaSettings settings = SambaSettings.load(this);
+        destination.setText(settings.isConfigured()
+                ? settings.displayName()
+                : t("No Samba folder set", "未设置 Samba 文件夹"));
     }
 
     private void enterSelectionMode(PhotoItem item) {
@@ -1350,7 +1389,7 @@ public final class MainActivity extends Activity {
         if (selectedTab == Tab.LOCAL) {
             setStatus(localMediaStatus(photos.size()));
         } else {
-            setStatus(remotePhotos.isEmpty() ? "No remote media found" : remotePhotos.size() + " remote media files");
+            setStatus(remoteMediaStatus(remotePhotos.size()));
         }
     }
 
@@ -1370,6 +1409,16 @@ public final class MainActivity extends Activity {
         int selected = 0;
         for (PhotoItem item : photos) {
             if (item.selected) {
+                selected++;
+            }
+        }
+        return selected;
+    }
+
+    private int selectedLocalNoSyncCount() {
+        int selected = 0;
+        for (PhotoItem item : photos) {
+            if (item.selected && item.noSync) {
                 selected++;
             }
         }
@@ -1402,11 +1451,14 @@ public final class MainActivity extends Activity {
 
     private void updateSelectionStatus() {
         int selected = selectedCurrentCount();
-        setStatus(selected == 1 ? "1 selected" : selected + " selected");
+        setStatus(selectedStatusText(selected));
     }
 
     private String localMediaStatus(int count) {
-        return count == 0 ? "No camera media found" : count + " camera media files";
+        if (count == 0) {
+            return t("No camera media found", "没有相机媒体");
+        }
+        return isChinese() ? count + " 个相机媒体文件" : count + " camera media files";
     }
 
     private void updateButtons() {
@@ -1424,21 +1476,27 @@ public final class MainActivity extends Activity {
         if (buttonRow != null) {
             buttonRow.setVisibility(selecting ? View.VISIBLE : View.GONE);
         }
-        if (syncAllButton == null || deleteSyncedButton == null || uploadSelectedButton == null || noSyncButton == null || deleteSelectedButton == null || cancelSelectionButton == null) {
+        if (noSyncRow != null) {
+            noSyncRow.setVisibility(localVisible && selecting ? View.VISIBLE : View.GONE);
+        }
+        if (syncAllButton == null || deleteSyncedButton == null || uploadSelectedButton == null || noSyncButton == null || reEnableSyncButton == null || deleteSelectedButton == null || cancelSelectionButton == null) {
             return;
         }
 
         int selected = selectedCurrentCount();
         int selectedLocal = selectedLocalCount();
+        int selectedNoSync = selectedLocalNoSyncCount();
         boolean busy = uploading || deleting;
         syncAllButton.setEnabled(localVisible && !busy && !photos.isEmpty());
         int synced = syncedLocalCount();
         deleteSyncedButton.setEnabled(localVisible && !busy && synced > 0);
         uploadSelectedButton.setVisibility(localVisible && selecting ? View.VISIBLE : View.GONE);
         uploadSelectedButton.setEnabled(localVisible && selecting && !busy && selectedLocal > 0);
-        uploadSelectedButton.setText(selectedLocal > 0 ? "Upload " + selectedLocal : "Upload");
+        uploadSelectedButton.setText(selectedLocal > 0 ? uploadCountText(selectedLocal) : t("Upload", "上传"));
         noSyncButton.setVisibility(localVisible && selecting ? View.VISIBLE : View.GONE);
         noSyncButton.setEnabled(localVisible && selecting && !busy && selectedLocal > 0);
+        reEnableSyncButton.setVisibility(localVisible && selecting ? View.VISIBLE : View.GONE);
+        reEnableSyncButton.setEnabled(localVisible && selecting && !busy && selectedNoSync > 0);
         deleteSelectedButton.setEnabled(selecting && !busy && selected > 0);
         cancelSelectionButton.setEnabled(selecting && !busy);
     }
@@ -1450,6 +1508,86 @@ public final class MainActivity extends Activity {
 
     private void setStatus(String message) {
         status.setText(message);
+    }
+
+    private String t(String english, String chinese) {
+        return UiText.text(this, english, chinese);
+    }
+
+    private boolean isChinese() {
+        return UiText.isChinese(this);
+    }
+
+    private String remoteMediaStatus(int count) {
+        if (count == 0) {
+            return t("No remote media found", "没有远程媒体");
+        }
+        return isChinese() ? count + " 个远程媒体文件" : count + " remote media files";
+    }
+
+    private String selectedStatusText(int count) {
+        return isChinese() ? count + " 个已选择" : (count == 1 ? "1 selected" : count + " selected");
+    }
+
+    private String selectedItemLabel(int count) {
+        return isChinese() ? count + " 个所选项目" : (count == 1 ? "1 selected item" : count + " selected items");
+    }
+
+    private String syncedItemLabel(int count) {
+        return isChinese() ? count + " 个已同步项目" : (count == 1 ? "1 synced item" : count + " synced items");
+    }
+
+    private String markedNoSyncText(int count) {
+        return isChinese() ? count + " 个项目已标记为不同步" : (count == 1 ? "1 item marked No Sync" : count + " items marked No Sync");
+    }
+
+    private String reEnabledSyncText(int count) {
+        if (count == 0) {
+            return t("No selected No Sync items", "所选项目中没有不同步项目");
+        }
+        return isChinese() ? count + " 个项目已重新启用同步" : (count == 1 ? "1 item re-enabled for sync" : count + " items re-enabled for sync");
+    }
+
+    private String deletingText(int count) {
+        return isChinese() ? "正在删除 " + count + " 项" : "Deleting " + count;
+    }
+
+    private String deletingProgressText(int done, int total) {
+        return isChinese() ? "正在删除 " + done + " / " + total : "Deleting " + done + " of " + total;
+    }
+
+    private String deletingFromSambaText(int count) {
+        return isChinese() ? "正在从 Samba 删除 " + count + " 项" : "Deleting " + count + " from Samba";
+    }
+
+    private String deletingFromSambaProgressText(int done, int total) {
+        return isChinese() ? "正在从 Samba 删除 " + done + " / " + total : "Deleting " + done + " of " + total + " from Samba";
+    }
+
+    private String deletedText(int count) {
+        return isChinese() ? "已删除 " + count + " 项" : "Deleted " + count;
+    }
+
+    private String deletedFailedText(int deletedCount, int failedCount) {
+        return isChinese()
+                ? "已删除 " + deletedCount + " 项  失败 " + failedCount + " 项"
+                : "Deleted " + deletedCount + "  Failed " + failedCount;
+    }
+
+    private String deletedWaitingPermissionText(int deletedSoFar) {
+        return isChinese()
+                ? "已删除 " + deletedSoFar + " 项；正在等待权限"
+                : "Deleted " + deletedSoFar + "; waiting for permission";
+    }
+
+    private String uploadSummaryText(int uploaded, int skipped, int failed) {
+        return isChinese()
+                ? "已上传 " + uploaded + "  已跳过 " + skipped + "  失败 " + failed
+                : "Uploaded " + uploaded + "  Skipped " + skipped + "  Failed " + failed;
+    }
+
+    private String uploadCountText(int count) {
+        return isChinese() ? "上传 " + count + " 项" : "Upload " + count;
     }
 
     private boolean hasPhotoPermission() {
@@ -1522,6 +1660,23 @@ public final class MainActivity extends Activity {
         GradientDrawable background = new GradientDrawable();
         background.setCornerRadius(dp(7));
         background.setColor(Color.rgb(102, 110, 120));
+        button.setBackground(background);
+        return button;
+    }
+
+    private Button successButton(String text) {
+        Button button = new Button(this);
+        button.setAllCaps(false);
+        button.setText(text);
+        button.setTextSize(14);
+        button.setTextColor(Color.WHITE);
+        button.setGravity(Gravity.CENTER);
+        button.setMinHeight(0);
+        button.setMinWidth(0);
+        button.setPadding(dp(10), 0, dp(10), 0);
+        GradientDrawable background = new GradientDrawable();
+        background.setCornerRadius(dp(7));
+        background.setColor(getColorCompat(R.color.success));
         button.setBackground(background);
         return button;
     }

@@ -66,7 +66,7 @@ final class SambaUploader {
             ContentResolver resolver = context.getContentResolver();
             int total = items.size();
             for (PhotoItem item : items) {
-                listener.onProgress(summary.totalDone(), total, "Uploading " + item.name);
+                listener.onProgress(summary.totalDone(), total, uploadProgressText(context, item.name));
                 try {
                     UploadState state = uploadOne(resolver, settings, smbContext, item);
                     if (state == UploadState.SKIPPED) {
@@ -79,7 +79,7 @@ final class SambaUploader {
                 } catch (Exception ignored) {
                     summary.failed++;
                 }
-                listener.onProgress(summary.totalDone(), total, progressText(summary, total));
+                listener.onProgress(summary.totalDone(), total, progressText(context, summary, total));
             }
         } catch (Exception ignored) {
             summary.failed = items.size();
@@ -294,7 +294,17 @@ final class SambaUploader {
         throw new IOException("No available file name");
     }
 
-    private static String progressText(Summary summary, int total) {
+    private static String uploadProgressText(Context context, String name) {
+        return UiText.isChinese(context) ? "正在上传 " + name : "Uploading " + name;
+    }
+
+    private static String progressText(Context context, Summary summary, int total) {
+        if (UiText.isChinese(context)) {
+            return "完成 " + summary.totalDone() + " / " + total
+                    + "  已上传 " + summary.uploaded
+                    + "  已跳过 " + summary.skipped
+                    + "  失败 " + summary.failed;
+        }
         return "Done " + summary.totalDone() + " of " + total
                 + "  Uploaded " + summary.uploaded
                 + "  Skipped " + summary.skipped
