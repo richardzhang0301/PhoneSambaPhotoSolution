@@ -30,10 +30,12 @@ import android.text.InputType;
 import android.text.TextUtils;
 import android.view.DisplayCutout;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.inputmethod.InputMethodManager;
+import android.widget.AbsListView;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -47,8 +49,10 @@ import android.widget.TextView;
 import android.widget.Toast;
 import android.webkit.MimeTypeMap;
 
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -88,6 +92,9 @@ public final class MainActivity extends Activity {
     private RemotePhotoGridAdapter remoteAdapter;
     private GridView localGrid;
     private GridView remoteGrid;
+    private FrameLayout gridContent;
+    private TextView dateScaleLabel;
+    private ImageButton fastScrollButton;
     private LinearLayout selectionActionRow;
     private LinearLayout selectionRowsColumn;
     private LinearLayout buttonRow;
@@ -115,8 +122,15 @@ public final class MainActivity extends Activity {
     private boolean localLoaded;
     private boolean remoteLoaded;
     private boolean selectionMode;
+    private boolean fastScrollDragging;
+    private int gridScrollState;
     private String localLoadedIdentity = "";
     private String remoteLoadedIdentity = "";
+    private final Runnable hideDateScaleLabel = () -> {
+        if (!fastScrollDragging && dateScaleLabel != null) {
+            dateScaleLabel.setVisibility(View.GONE);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -184,6 +198,7 @@ public final class MainActivity extends Activity {
         scanExecutor.shutdownNow();
         remoteExecutor.shutdownNow();
         uploadExecutor.shutdownNow();
+        main.removeCallbacks(hideDateScaleLabel);
         if (thumbLoader != null) {
             thumbLoader.shutdown();
         }
@@ -368,13 +383,14 @@ public final class MainActivity extends Activity {
         actions.addView(progress, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4)));
         root.addView(actions, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        FrameLayout content = new FrameLayout(this);
+        gridContent = new FrameLayout(this);
         localGrid = photoGrid();
         remoteGrid = photoGrid();
         remoteGrid.setVisibility(View.GONE);
-        content.addView(localGrid, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        content.addView(remoteGrid, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        root.addView(content, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        gridContent.addView(localGrid, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        gridContent.addView(remoteGrid, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        addFastScrollOverlay(gridContent);
+        root.addView(gridContent, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
         updateDestinationLabel();
         updateButtons();
@@ -434,7 +450,251 @@ public final class MainActivity extends Activity {
         grid.setColumnWidth(dp(118));
         grid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
         grid.setGravity(Gravity.CENTER);
+        grid.setVerticalScrollBarEnabled(false);
+        grid.setOnScrollListener(new AbsListView.OnScrollListener() {
+            @Override
+            public void onScrollStateChanged(AbsListView view, int scrollState) {
+                gridScrollState = scrollState;
+                if (scrollState == SCROLL_STATE_IDLE) {
+                    updateDateScaleOverlay(false);
+                    scheduleDateScaleLabelHide();
+                } else {
+                    updateDateScaleOverlay(true);
+                }
+            }
+
+            @Override
+            public void onScroll(AbsListView view, int firstVisibleItem, int visibleItemCount, int totalItemCount) {
+                updateDateScaleOverlay(gridScrollState != SCROLL_STATE_IDLE || fastScrollDragging);
+            }
+        });
         return grid;
+    }
+
+    private void addFastScrollOverlay(FrameLayout content) {
+        dateScaleLabel = new TextView(this);
+        dateScaleLabel.setTextColor(Color.WHITE);
+        dateScaleLabel.setTextSize(13);
+        dateScaleLabel.setGravity(Gravity.CENTER);
+        dateScaleLabel.setSingleLine(true);
+        dateScaleLabel.setMinWidth(dp(76));
+        dateScaleLabel.setPadding(dp(12), 0, dp(12), 0);
+        dateScaleLabel.setBackgroundResource(R.drawable.fast_scroll_label);
+        dateScaleLabel.setVisibility(View.GONE);
+        FrameLayout.LayoutParams labelParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(36),
+                Gravity.TOP | Gravity.END
+        );
+        labelParams.setMargins(0, dp(12), dp(72), 0);
+        content.addView(dateScaleLabel, labelParams);
+
+        fastScrollButton = iconButton(R.drawable.ic_vertical_arrows, t("Scroll by date", "按日期滚动"));
+        fastScrollButton.setBackgroundResource(R.drawable.fast_scroll_handle);
+        fastScrollButton.setVisibility(View.GONE);
+        fastScrollButton.setOnClickListener(v -> showDateScaleTemporarily());
+        fastScrollButton.setOnTouchListener((view, event) -> {
+            boolean handled = handleFastScrollTouch(event);
+            if (event.getActionMasked() == MotionEvent.ACTION_UP) {
+                view.performClick();
+            }
+            return handled;
+        });
+        FrameLayout.LayoutParams handleParams = new FrameLayout.LayoutParams(dp(56), dp(64), Gravity.TOP | Gravity.END);
+        handleParams.setMargins(0, dp(12), dp(8), 0);
+        content.addView(fastScrollButton, handleParams);
+        content.post(() -> updateDateScaleOverlay(false));
+    }
+
+    private boolean handleFastScrollTouch(MotionEvent event) {
+        if (gridContent == null || currentGrid() == null || currentMediaCount() == 0) {
+            return false;
+        }
+
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            fastScrollDragging = true;
+            main.removeCallbacks(hideDateScaleLabel);
+            if (gridContent.getParent() != null) {
+                gridContent.getParent().requestDisallowInterceptTouchEvent(true);
+            }
+            fastScrollToRawY(event.getRawY());
+            return true;
+        }
+        if (action == MotionEvent.ACTION_MOVE) {
+            fastScrollToRawY(event.getRawY());
+            return true;
+        }
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            if (action == MotionEvent.ACTION_UP) {
+                fastScrollToRawY(event.getRawY());
+            }
+            fastScrollDragging = false;
+            if (gridContent.getParent() != null) {
+                gridContent.getParent().requestDisallowInterceptTouchEvent(false);
+            }
+            scheduleDateScaleLabelHide();
+            return true;
+        }
+        return false;
+    }
+
+    private void fastScrollToRawY(float rawY) {
+        GridView grid = currentGrid();
+        int count = currentMediaCount();
+        if (grid == null || count == 0) {
+            return;
+        }
+
+        float fraction = fastScrollFractionForRawY(rawY);
+        int first = Math.max(0, grid.getFirstVisiblePosition());
+        int last = grid.getLastVisiblePosition();
+        int visibleCount = Math.max(1, last >= first ? last - first + 1 : 1);
+        int maxFirst = Math.max(0, count - visibleCount);
+        int target = maxFirst == 0 ? 0 : Math.min(count - 1, Math.round(maxFirst * fraction));
+        grid.setSelection(target);
+        updateDateScalePosition(fraction, dateScaleMillisAt(target), true);
+    }
+
+    private float fastScrollFractionForRawY(float rawY) {
+        int[] location = new int[2];
+        gridContent.getLocationOnScreen(location);
+        int handleHeight = fastScrollHandleHeight();
+        int topInset = dp(12);
+        int bottomInset = dp(12);
+        int travel = Math.max(1, gridContent.getHeight() - handleHeight - topInset - bottomInset);
+        float y = rawY - location[1] - topInset - handleHeight / 2f;
+        return clamp(y / travel, 0f, 1f);
+    }
+
+    private void updateDateScaleOverlay(boolean showLabel) {
+        GridView grid = currentGrid();
+        int count = currentMediaCount();
+        boolean visible = gridContent != null && fastScrollButton != null && grid != null && grid.getVisibility() == View.VISIBLE && count > 0;
+        if (fastScrollButton != null) {
+            fastScrollButton.setVisibility(visible ? View.VISIBLE : View.GONE);
+        }
+        if (!visible) {
+            main.removeCallbacks(hideDateScaleLabel);
+            if (dateScaleLabel != null) {
+                dateScaleLabel.setVisibility(View.GONE);
+            }
+            return;
+        }
+
+        int first = Math.max(0, Math.min(grid.getFirstVisiblePosition(), count - 1));
+        int last = grid.getLastVisiblePosition();
+        int visibleCount = Math.max(1, last >= first ? last - first + 1 : 1);
+        int maxFirst = Math.max(0, count - visibleCount);
+        float fraction = maxFirst == 0 ? 0f : clamp(first / (float) maxFirst, 0f, 1f);
+        updateDateScalePosition(fraction, dateScaleMillisAt(first), showLabel);
+    }
+
+    private void updateDateScalePosition(float fraction, long millis, boolean showLabel) {
+        if (gridContent == null || fastScrollButton == null || dateScaleLabel == null) {
+            return;
+        }
+
+        int handleHeight = fastScrollHandleHeight();
+        int handleTop = fastScrollTopForFraction(fraction, handleHeight);
+        FrameLayout.LayoutParams handleParams = (FrameLayout.LayoutParams) fastScrollButton.getLayoutParams();
+        handleParams.gravity = Gravity.TOP | Gravity.END;
+        handleParams.topMargin = handleTop;
+        handleParams.rightMargin = dp(8);
+        fastScrollButton.setLayoutParams(handleParams);
+
+        dateScaleLabel.setText(formatDateScale(millis));
+        int labelHeight = dp(36);
+        int labelTop = clamp(handleTop + (handleHeight - labelHeight) / 2, dp(8), Math.max(dp(8), gridContent.getHeight() - labelHeight - dp(8)));
+        FrameLayout.LayoutParams labelParams = (FrameLayout.LayoutParams) dateScaleLabel.getLayoutParams();
+        labelParams.gravity = Gravity.TOP | Gravity.END;
+        labelParams.topMargin = labelTop;
+        labelParams.rightMargin = dp(72);
+        dateScaleLabel.setLayoutParams(labelParams);
+
+        if (showLabel) {
+            showDateScaleTemporarily();
+        }
+    }
+
+    private int fastScrollTopForFraction(float fraction, int childHeight) {
+        if (gridContent == null || gridContent.getHeight() <= 0) {
+            return dp(12);
+        }
+        int topInset = dp(12);
+        int bottomInset = dp(12);
+        int travel = Math.max(0, gridContent.getHeight() - childHeight - topInset - bottomInset);
+        return topInset + Math.round(travel * clamp(fraction, 0f, 1f));
+    }
+
+    private int fastScrollHandleHeight() {
+        if (fastScrollButton == null || fastScrollButton.getLayoutParams() == null || fastScrollButton.getLayoutParams().height <= 0) {
+            return dp(64);
+        }
+        return fastScrollButton.getLayoutParams().height;
+    }
+
+    private GridView currentGrid() {
+        return selectedTab == Tab.REMOTE ? remoteGrid : localGrid;
+    }
+
+    private int currentMediaCount() {
+        return selectedTab == Tab.REMOTE ? remotePhotos.size() : photos.size();
+    }
+
+    private long dateScaleMillisAt(int position) {
+        if (selectedTab == Tab.REMOTE) {
+            if (position >= 0 && position < remotePhotos.size()) {
+                return remotePhotos.get(position).lastModifiedMillis;
+            }
+            return 0L;
+        }
+        if (position >= 0 && position < photos.size()) {
+            return photos.get(position).sortTimeMillis();
+        }
+        return 0L;
+    }
+
+    private String formatDateScale(long millis) {
+        if (millis <= 0L) {
+            return t("Unknown", "未知");
+        }
+        Locale locale = isChinese() ? Locale.CHINA : Locale.US;
+        String pattern = isChinese() ? "yyyy年M月" : "MMM yyyy";
+        return new SimpleDateFormat(pattern, locale).format(new Date(millis));
+    }
+
+    private void showDateScaleTemporarily() {
+        if (dateScaleLabel == null || currentMediaCount() == 0) {
+            return;
+        }
+        dateScaleLabel.setVisibility(View.VISIBLE);
+        main.removeCallbacks(hideDateScaleLabel);
+        if (!fastScrollDragging) {
+            main.postDelayed(hideDateScaleLabel, 1200L);
+        }
+    }
+
+    private void scheduleDateScaleLabelHide() {
+        main.removeCallbacks(hideDateScaleLabel);
+        if (!fastScrollDragging) {
+            main.postDelayed(hideDateScaleLabel, 900L);
+        }
+    }
+
+    private void hideDateScaleLabelNow() {
+        main.removeCallbacks(hideDateScaleLabel);
+        if (dateScaleLabel != null) {
+            dateScaleLabel.setVisibility(View.GONE);
+        }
+    }
+
+    private float clamp(float value, float min, float max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     private void selectTab(Tab tab) {
@@ -451,6 +711,8 @@ public final class MainActivity extends Activity {
             }
         }
         selectedTab = tab;
+        gridScrollState = AbsListView.OnScrollListener.SCROLL_STATE_IDLE;
+        hideDateScaleLabelNow();
         if (localGrid != null) {
             localGrid.setVisibility(tab == Tab.LOCAL ? View.VISIBLE : View.GONE);
         }
@@ -1872,6 +2134,7 @@ public final class MainActivity extends Activity {
             wipeThumbCacheButton.setVisibility(remoteVisible ? View.VISIBLE : View.GONE);
             wipeThumbCacheButton.setEnabled(remoteVisible && !busy);
         }
+        updateDateScaleOverlay(false);
         if (localActionRow != null) {
             localActionRow.setVisibility(localVisible && !selecting ? View.VISIBLE : View.GONE);
         }
