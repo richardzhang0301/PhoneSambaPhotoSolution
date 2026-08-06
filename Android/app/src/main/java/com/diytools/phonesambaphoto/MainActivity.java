@@ -6,10 +6,14 @@ import android.app.AlertDialog;
 import android.app.DatePickerDialog;
 import android.app.PendingIntent;
 import android.app.RecoverableSecurityException;
+import android.content.ClipData;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentSender;
 import android.content.pm.PackageManager;
+import android.content.res.AssetFileDescriptor;
+import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.drawable.Drawable;
@@ -19,7 +23,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.DocumentsContract;
 import android.provider.MediaStore;
+import android.provider.OpenableColumns;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.view.DisplayCutout;
@@ -39,6 +45,7 @@ import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.webkit.MimeTypeMap;
 
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -55,6 +62,7 @@ import jcifs.smb.SmbFile;
 public final class MainActivity extends Activity {
     private static final int REQUEST_IMAGES = 1001;
     private static final int REQUEST_DELETE_SELECTED = 1002;
+    private static final int REQUEST_PICK_SAMBA_UPLOAD = 1003;
 
     private enum Tab {
         LOCAL,
@@ -90,6 +98,9 @@ public final class MainActivity extends Activity {
     private ProgressBar progress;
     private Button localTabButton;
     private Button remoteTabButton;
+    private ImageButton sambaUploadButton;
+    private ImageButton wipeThumbCacheButton;
+    private Button selectAllButton;
     private Button syncAllButton;
     private Button deleteSyncedButton;
     private Button uploadSelectedButton;
@@ -194,6 +205,10 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_PICK_SAMBA_UPLOAD) {
+            handleSambaUploadPickerResult(resultCode, data);
+            return;
+        }
         if (requestCode != REQUEST_DELETE_SELECTED) {
             return;
         }
@@ -227,9 +242,17 @@ public final class MainActivity extends Activity {
         title.setGravity(Gravity.CENTER_VERTICAL);
         toolbar.addView(title, new LinearLayout.LayoutParams(0, dp(48), 1));
 
+        sambaUploadButton = iconButton(R.drawable.ic_upload, t("Upload to Samba", "上传到 Samba"));
+        sambaUploadButton.setOnClickListener(v -> openSambaUploadPicker());
+        toolbar.addView(sambaUploadButton, new LinearLayout.LayoutParams(dp(44), dp(44)));
+
         ImageButton refreshButton = iconButton(R.drawable.ic_refresh, t("Refresh", "刷新"));
         refreshButton.setOnClickListener(v -> refreshCurrentTab());
         toolbar.addView(refreshButton, new LinearLayout.LayoutParams(dp(44), dp(44)));
+
+        wipeThumbCacheButton = iconButton(R.drawable.ic_wipe_cache, t("Clear cached Samba thumbnails", "清除 Samba 缩略图缓存"));
+        wipeThumbCacheButton.setOnClickListener(v -> showThumbnailCacheWipeDialog());
+        toolbar.addView(wipeThumbCacheButton, new LinearLayout.LayoutParams(dp(44), dp(44)));
 
         ImageButton settingsButton = iconButton(R.drawable.ic_settings, t("Samba folder", "Samba 文件夹"));
         settingsButton.setOnClickListener(v -> showSettingsDialog());
@@ -270,6 +293,12 @@ public final class MainActivity extends Activity {
 
         localActionRow = new LinearLayout(this);
         localActionRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        selectAllButton = secondaryButton(t("Select all", "全选"), R.drawable.ic_check_circle);
+        selectAllButton.setOnClickListener(v -> selectAll());
+        LinearLayout.LayoutParams selectParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+        selectParams.setMargins(0, 0, dp(8), 0);
+        localActionRow.addView(selectAllButton, selectParams);
 
         syncAllButton = primaryButton(t("Sync all", "全部同步"), R.drawable.ic_sync);
         syncAllButton.setOnClickListener(v -> syncAll());
@@ -475,6 +504,276 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void openSambaUploadPicker() {
+        if (uploading || deleting || selectedTab != Tab.REMOTE) {
+            return;
+        }
+        SambaSettings settings = SambaSettings.load(this);
+        if (!settings.isConfigured()) {
+            showSettingsDialog();
+            return;
+        }
+
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            startActivityForResult(Intent.createChooser(intent, t("Select photos or videos", "选择照片或视频")), REQUEST_PICK_SAMBA_UPLOAD);
+        } catch (RuntimeException exc) {
+            setStatus(t("Cannot open file picker", "无法打开文件选择器"));
+        }
+    }
+
+    private void handleSambaUploadPickerResult(int resultCode, Intent data) {
+        if (resultCode != RESULT_OK || data == null) {
+            setStatus(t("Upload cancelled", "已取消上传"));
+            return;
+        }
+        SambaSettings settings = SambaSettings.load(this);
+        if (!settings.isConfigured()) {
+            showSettingsDialog();
+            return;
+        }
+
+        List<PhotoItem> picked = pickedUploadItems(data);
+        if (picked.isEmpty()) {
+            setStatus(t("No photos or videos selected", "没有选择照片或视频"));
+            return;
+        }
+        startUpload(settings, picked);
+    }
+
+    private List<PhotoItem> pickedUploadItems(Intent data) {
+        List<PhotoItem> picked = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        ClipData clipData = data.getClipData();
+        if (clipData != null) {
+            for (int index = 0; index < clipData.getItemCount(); index++) {
+                Uri uri = clipData.getItemAt(index).getUri();
+                addPickedUploadItem(data, uri, index, picked, seen);
+            }
+        } else {
+            addPickedUploadItem(data, data.getData(), 0, picked, seen);
+        }
+        return picked;
+    }
+
+    private void addPickedUploadItem(Intent data, Uri uri, int index, List<PhotoItem> picked, Set<String> seen) {
+        if (uri == null || !seen.add(uri.toString())) {
+            return;
+        }
+        persistPickedUploadPermission(data, uri);
+        PhotoItem item = pickedUploadItem(uri, index);
+        if (item != null) {
+            picked.add(item);
+        }
+    }
+
+    private void persistPickedUploadPermission(Intent data, Uri uri) {
+        if ((data.getFlags() & Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION) == 0) {
+            return;
+        }
+        try {
+            getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (RuntimeException ignored) {
+            // Some providers grant temporary picker access only; upload can still proceed immediately.
+        }
+    }
+
+    private PhotoItem pickedUploadItem(Uri uri, int index) {
+        ContentResolver resolver = getContentResolver();
+        String mime = resolver.getType(uri);
+        String name = "";
+        long size = -1L;
+        long modifiedMillis = 0L;
+
+        try (Cursor cursor = resolver.query(uri, null, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                name = getColumnString(cursor, OpenableColumns.DISPLAY_NAME, "");
+                size = getColumnLong(cursor, OpenableColumns.SIZE, -1L);
+                long documentModified = getColumnLong(cursor, DocumentsContract.Document.COLUMN_LAST_MODIFIED, 0L);
+                long mediaModifiedSeconds = getColumnLong(cursor, MediaStore.MediaColumns.DATE_MODIFIED, 0L);
+                modifiedMillis = documentModified > 0L ? documentModified : mediaModifiedSeconds * 1000L;
+            }
+        } catch (RuntimeException ignored) {
+            // Fall back to URI and MIME metadata below.
+        }
+
+        if (TextUtils.isEmpty(name)) {
+            name = uri.getLastPathSegment();
+        }
+        boolean video = isVideoMedia(mime, name);
+        boolean image = isImageMedia(mime, name);
+        if (!image && !video) {
+            return null;
+        }
+
+        if (size < 0L) {
+            size = pickedUploadSize(uri);
+        }
+        if (modifiedMillis <= 0L) {
+            modifiedMillis = System.currentTimeMillis();
+        }
+        String cleanName = pickedUploadName(name, mime, video, index);
+        long id = pickedUploadId(uri, index);
+        return new PhotoItem(id, uri, cleanName, Math.max(0L, size), modifiedMillis / 1000L, modifiedMillis, false, video);
+    }
+
+    private String getColumnString(Cursor cursor, String column, String fallback) {
+        int index = cursor.getColumnIndex(column);
+        if (index < 0 || cursor.isNull(index)) {
+            return fallback;
+        }
+        String value = cursor.getString(index);
+        return TextUtils.isEmpty(value) ? fallback : value;
+    }
+
+    private long getColumnLong(Cursor cursor, String column, long fallback) {
+        int index = cursor.getColumnIndex(column);
+        if (index < 0 || cursor.isNull(index)) {
+            return fallback;
+        }
+        return cursor.getLong(index);
+    }
+
+    private long pickedUploadSize(Uri uri) {
+        try (AssetFileDescriptor descriptor = getContentResolver().openAssetFileDescriptor(uri, "r")) {
+            if (descriptor != null && descriptor.getLength() >= 0L) {
+                return descriptor.getLength();
+            }
+        } catch (Exception ignored) {
+            // Unknown size is allowed; upload still streams the content.
+        }
+        return 0L;
+    }
+
+    private String pickedUploadName(String name, String mime, boolean video, int index) {
+        String clean = TextUtils.isEmpty(name) ? "" : name.trim().replace('\\', '_').replace('/', '_');
+        if (TextUtils.isEmpty(clean)) {
+            clean = (video ? "video_" : "photo_") + (index + 1);
+        }
+        if (!hasExtension(clean)) {
+            clean = clean + "." + fallbackExtension(mime, video);
+        }
+        return clean;
+    }
+
+    private long pickedUploadId(Uri uri, int index) {
+        return Math.abs((((long) uri.toString().hashCode()) << 16) ^ index);
+    }
+
+    private boolean isImageMedia(String mime, String name) {
+        if (!TextUtils.isEmpty(mime) && mime.toLowerCase(Locale.US).startsWith("image/")) {
+            return true;
+        }
+        String extension = fileExtension(name);
+        return extension.equals("jpg") || extension.equals("jpeg") || extension.equals("png")
+                || extension.equals("gif") || extension.equals("webp") || extension.equals("heic")
+                || extension.equals("heif") || extension.equals("bmp") || extension.equals("dng");
+    }
+
+    private boolean isVideoMedia(String mime, String name) {
+        if (!TextUtils.isEmpty(mime) && mime.toLowerCase(Locale.US).startsWith("video/")) {
+            return true;
+        }
+        String extension = fileExtension(name);
+        return extension.equals("mp4") || extension.equals("mov") || extension.equals("m4v")
+                || extension.equals("3gp") || extension.equals("mkv") || extension.equals("webm")
+                || extension.equals("avi");
+    }
+
+    private boolean hasExtension(String name) {
+        return !TextUtils.isEmpty(fileExtension(name));
+    }
+
+    private String fileExtension(String name) {
+        if (TextUtils.isEmpty(name)) {
+            return "";
+        }
+        int dot = name.lastIndexOf('.');
+        if (dot < 0 || dot == name.length() - 1) {
+            return "";
+        }
+        return name.substring(dot + 1).toLowerCase(Locale.US);
+    }
+
+    private String fallbackExtension(String mime, boolean video) {
+        if (!TextUtils.isEmpty(mime)) {
+            String extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime);
+            if (!TextUtils.isEmpty(extension)) {
+                return extension.toLowerCase(Locale.US);
+            }
+        }
+        return video ? "mp4" : "jpg";
+    }
+
+    private void showThumbnailCacheWipeDialog() {
+        if (uploading || deleting) {
+            return;
+        }
+
+        final int weekId = View.generateViewId();
+        final int monthId = View.generateViewId();
+        final int yearId = View.generateViewId();
+        final int allId = View.generateViewId();
+
+        RadioGroup options = new RadioGroup(this);
+        options.setOrientation(RadioGroup.VERTICAL);
+        int pad = dp(18);
+        options.setPadding(pad, dp(8), pad, dp(8));
+        options.addView(rangeRadioButton(weekId, t("Before last week", "一周以前")));
+        options.addView(rangeRadioButton(monthId, t("Before last month", "一个月以前")));
+        options.addView(rangeRadioButton(yearId, t("Before last year", "一年以前")));
+        options.addView(rangeRadioButton(allId, t("All", "全部")));
+        options.check(weekId);
+
+        new AlertDialog.Builder(this)
+                .setTitle(t("Clear cached thumbnails", "清除缓存缩略图"))
+                .setView(options)
+                .setNegativeButton(t("Cancel", "取消"), null)
+                .setPositiveButton(t("Clear", "清除"), (dialog, which) -> {
+                    long cutoffMillis = thumbnailCacheCutoff(options.getCheckedRadioButtonId(), weekId, monthId, yearId, allId);
+                    clearRemoteThumbnailCache(cutoffMillis);
+                })
+                .show();
+    }
+
+    private long thumbnailCacheCutoff(int checkedId, int weekId, int monthId, int yearId, int allId) {
+        if (checkedId == allId) {
+            return Long.MAX_VALUE;
+        }
+        Calendar cutoff = Calendar.getInstance();
+        if (checkedId == monthId) {
+            cutoff.add(Calendar.MONTH, -1);
+        } else if (checkedId == yearId) {
+            cutoff.add(Calendar.YEAR, -1);
+        } else {
+            cutoff.add(Calendar.DAY_OF_YEAR, -7);
+        }
+        return cutoff.getTimeInMillis();
+    }
+
+    private void clearRemoteThumbnailCache(long cutoffMillis) {
+        if (remoteThumbLoader == null) {
+            return;
+        }
+        setStatus(t("Clearing cached thumbnails", "正在清除缓存缩略图"));
+        remoteExecutor.execute(() -> {
+            int deleted = remoteThumbLoader.clearDiskCacheBefore(cutoffMillis);
+            main.post(() -> {
+                if (remoteAdapter != null) {
+                    remoteAdapter.notifyDataSetChanged();
+                }
+                String message = thumbnailCacheClearedText(deleted);
+                Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+                setStatus(message);
+            });
+        });
+    }
+
     private void loadPhotos() {
         if (!hasPhotoPermission()) {
             requestPhotoPermission();
@@ -656,6 +955,43 @@ public final class MainActivity extends Activity {
     private static String sambaMatchKey(String name, long size, boolean video) {
         String normalizedName = TextUtils.isEmpty(name) ? "" : name.toLowerCase(Locale.US);
         return (video ? "video" : "image") + "|" + normalizedName + "|" + size;
+    }
+
+    private void selectAll() {
+        if (selectedTab != Tab.LOCAL || uploading || deleting) {
+            return;
+        }
+        if (photos.isEmpty()) {
+            setStatus(localMediaStatus(0));
+            return;
+        }
+        showDateRangeDialog(t("Select date range", "选择日期范围"), this::selectDateRange);
+    }
+
+    private void selectDateRange(long startMillis, long endMillis) {
+        if (uploading || deleting) {
+            return;
+        }
+        clearLocalSelection();
+        clearRemoteSelection();
+        int selected = 0;
+        for (PhotoItem photo : photos) {
+            if (isInDateRange(photo, startMillis, endMillis)) {
+                photo.selected = true;
+                selected++;
+            }
+        }
+        selectionMode = selected > 0;
+        if (adapter != null) {
+            adapter.notifyDataSetChanged();
+        }
+        if (remoteAdapter != null) {
+            remoteAdapter.notifyDataSetChanged();
+        }
+        updateButtons();
+        setStatus(selected > 0
+                ? selectedStatusText(selected)
+                : t("No media to select in date range", "该日期范围内没有可选择的媒体"));
     }
 
     private void syncAll() {
@@ -1273,7 +1609,9 @@ public final class MainActivity extends Activity {
                                 item.selected = false;
                                 item.noSync = false;
                                 item.sambaExists = true;
-                                adapter.notifyDataSetChanged();
+                                if (adapter != null) {
+                                    adapter.notifyDataSetChanged();
+                                }
                             });
                         }
                     });
@@ -1285,9 +1623,14 @@ public final class MainActivity extends Activity {
                 progress.setVisibility(View.GONE);
                 selectionMode = false;
                 clearLocalSelection();
-                adapter.notifyDataSetChanged();
+                if (adapter != null) {
+                    adapter.notifyDataSetChanged();
+                }
                 updateButtons();
                 setStatus(uploadSummaryText(summary.uploaded, summary.skipped, summary.failed));
+                if (selectedTab == Tab.REMOTE) {
+                    loadRemotePhotos();
+                }
             });
         });
     }
@@ -1520,6 +1863,15 @@ public final class MainActivity extends Activity {
         boolean localVisible = selectedTab == Tab.LOCAL;
         boolean remoteVisible = selectedTab == Tab.REMOTE;
         boolean selecting = selectionMode && (localVisible || remoteVisible);
+        boolean busy = uploading || deleting;
+        if (sambaUploadButton != null) {
+            sambaUploadButton.setVisibility(remoteVisible ? View.VISIBLE : View.GONE);
+            sambaUploadButton.setEnabled(remoteVisible && !busy);
+        }
+        if (wipeThumbCacheButton != null) {
+            wipeThumbCacheButton.setVisibility(remoteVisible ? View.VISIBLE : View.GONE);
+            wipeThumbCacheButton.setEnabled(remoteVisible && !busy);
+        }
         if (localActionRow != null) {
             localActionRow.setVisibility(localVisible && !selecting ? View.VISIBLE : View.GONE);
         }
@@ -1540,14 +1892,14 @@ public final class MainActivity extends Activity {
         if (noSyncRow != null) {
             noSyncRow.setVisibility(localVisible && selecting ? View.VISIBLE : View.GONE);
         }
-        if (syncAllButton == null || deleteSyncedButton == null || uploadSelectedButton == null || noSyncButton == null || reEnableSyncButton == null || deleteSelectedButton == null || cancelSelectionButton == null) {
+        if (selectAllButton == null || syncAllButton == null || deleteSyncedButton == null || uploadSelectedButton == null || noSyncButton == null || reEnableSyncButton == null || deleteSelectedButton == null || cancelSelectionButton == null) {
             return;
         }
 
         int selected = selectedCurrentCount();
         int selectedLocal = selectedLocalCount();
         int selectedNoSync = selectedLocalNoSyncCount();
-        boolean busy = uploading || deleting;
+        selectAllButton.setEnabled(localVisible && !busy && !photos.isEmpty());
         syncAllButton.setEnabled(localVisible && !busy && !photos.isEmpty());
         int synced = syncedLocalCount();
         deleteSyncedButton.setEnabled(localVisible && !busy && synced > 0);
@@ -1613,6 +1965,13 @@ public final class MainActivity extends Activity {
             return t("No selected No Sync items", "所选项目中没有不同步项目");
         }
         return isChinese() ? count + " 个项目已重新启用同步" : (count == 1 ? "1 item re-enabled for sync" : count + " items re-enabled for sync");
+    }
+
+    private String thumbnailCacheClearedText(int count) {
+        if (count == 0) {
+            return t("No cached thumbnails cleared", "没有清除缓存缩略图");
+        }
+        return isChinese() ? "已清除 " + count + " 个缓存缩略图" : (count == 1 ? "Cleared 1 cached thumbnail" : "Cleared " + count + " cached thumbnails");
     }
 
     private String deletingText(int count) {

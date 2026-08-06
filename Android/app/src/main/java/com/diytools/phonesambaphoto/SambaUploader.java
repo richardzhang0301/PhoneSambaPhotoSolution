@@ -3,14 +3,17 @@ package com.diytools.phonesambaphoto;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
+import android.media.MediaMetadataRetriever;
 import android.os.Build;
 import android.os.CancellationSignal;
 import android.text.TextUtils;
+import android.net.Uri;
 import android.provider.MediaStore;
 import android.util.Size;
 
@@ -68,7 +71,7 @@ final class SambaUploader {
             for (PhotoItem item : items) {
                 listener.onProgress(summary.totalDone(), total, uploadProgressText(context, item.name));
                 try {
-                    UploadState state = uploadOne(resolver, settings, smbContext, item);
+                    UploadState state = uploadOne(context, resolver, settings, smbContext, item);
                     if (state == UploadState.SKIPPED) {
                         summary.skipped++;
                     } else {
@@ -101,10 +104,10 @@ final class SambaUploader {
         return base.withCredentials(authenticator);
     }
 
-    private static UploadState uploadOne(ContentResolver resolver, SambaSettings settings, CIFSContext context, PhotoItem item) throws Exception {
+    private static UploadState uploadOne(Context appContext, ContentResolver resolver, SambaSettings settings, CIFSContext context, PhotoItem item) throws Exception {
         SmbFile target = new SmbFile(settings.fileUrl(item.name), context);
         if (target.exists() && item.size > 0 && target.length() == item.size) {
-            uploadThumbnailBestEffort(resolver, settings, context, item, target);
+            uploadThumbnailBestEffort(appContext, resolver, settings, context, item, target);
             return UploadState.SKIPPED;
         }
         if (target.exists()) {
@@ -129,13 +132,13 @@ final class SambaUploader {
         if (item.dateModifiedSeconds > 0) {
             target.setLastModified(item.dateModifiedSeconds * 1000L);
         }
-        uploadThumbnailBestEffort(resolver, settings, context, item, target);
+        uploadThumbnailBestEffort(appContext, resolver, settings, context, item, target);
         return UploadState.UPLOADED;
     }
 
-    private static void uploadThumbnailBestEffort(ContentResolver resolver, SambaSettings settings, CIFSContext context, PhotoItem item, SmbFile target) {
+    private static void uploadThumbnailBestEffort(Context appContext, ContentResolver resolver, SambaSettings settings, CIFSContext context, PhotoItem item, SmbFile target) {
         try {
-            Bitmap thumbnail = loadThumbnail(resolver, item);
+            Bitmap thumbnail = loadThumbnail(appContext, resolver, item);
             if (thumbnail == null) {
                 return;
             }
@@ -149,28 +152,74 @@ final class SambaUploader {
         }
     }
 
-    private static Bitmap loadThumbnail(ContentResolver resolver, PhotoItem item) throws IOException {
+    private static Bitmap loadThumbnail(Context appContext, ContentResolver resolver, PhotoItem item) throws IOException {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            return resolver.loadThumbnail(
-                    item.uri,
-                    new Size(SambaThumbnailSpec.SIZE_PX, SambaThumbnailSpec.SIZE_PX),
-                    new CancellationSignal()
-            );
+            try {
+                Bitmap thumbnail = resolver.loadThumbnail(
+                        item.uri,
+                        new Size(SambaThumbnailSpec.SIZE_PX, SambaThumbnailSpec.SIZE_PX),
+                        new CancellationSignal()
+                );
+                if (thumbnail != null) {
+                    return thumbnail;
+                }
+            } catch (IOException ignored) {
+                // Fall through to stream/frame based thumbnail generation below.
+            }
         }
         if (item.video) {
-            return MediaStore.Video.Thumbnails.getThumbnail(
+            Bitmap thumbnail = MediaStore.Video.Thumbnails.getThumbnail(
                     resolver,
                     item.id,
                     MediaStore.Video.Thumbnails.MINI_KIND,
                     null
             );
+            return thumbnail != null ? thumbnail : loadVideoFrame(appContext, item.uri);
         }
-        return MediaStore.Images.Thumbnails.getThumbnail(
+        Bitmap thumbnail = MediaStore.Images.Thumbnails.getThumbnail(
                 resolver,
                 item.id,
                 MediaStore.Images.Thumbnails.MINI_KIND,
                 null
         );
+        return thumbnail != null ? thumbnail : decodeImageThumbnail(resolver, item.uri);
+    }
+
+    private static Bitmap decodeImageThumbnail(ContentResolver resolver, Uri uri) throws IOException {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        try (InputStream input = resolver.openInputStream(uri)) {
+            if (input == null) {
+                return null;
+            }
+            BitmapFactory.decodeStream(input, null, bounds);
+        }
+
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, SambaThumbnailSpec.SIZE_PX);
+        options.inPreferredConfig = Bitmap.Config.RGB_565;
+        try (InputStream input = resolver.openInputStream(uri)) {
+            if (input == null) {
+                return null;
+            }
+            return BitmapFactory.decodeStream(input, null, options);
+        }
+    }
+
+    private static Bitmap loadVideoFrame(Context context, Uri uri) {
+        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+        try {
+            retriever.setDataSource(context, uri);
+            return retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+        } catch (RuntimeException ignored) {
+            return null;
+        } finally {
+            try {
+                retriever.release();
+            } catch (IOException | RuntimeException ignored) {
+                // Nothing to recover here; thumbnail generation is best effort.
+            }
+        }
     }
 
     private static Bitmap prepareThumbnail(Bitmap source, boolean video) {
@@ -179,6 +228,17 @@ final class SambaUploader {
         }
         Bitmap scaled = scaleInside(source, SambaThumbnailSpec.SIZE_PX);
         return video ? addPlayOverlay(scaled) : copyForJpeg(scaled);
+    }
+
+    private static int sampleSize(int width, int height, int target) {
+        if (width <= 0 || height <= 0 || target <= 0) {
+            return 1;
+        }
+        int sample = 1;
+        while (height / sample > target * 2 || width / sample > target * 2) {
+            sample *= 2;
+        }
+        return sample;
     }
 
     private static Bitmap scaleInside(Bitmap source, int maxSize) {
