@@ -18,6 +18,7 @@ import android.graphics.Matrix;
 import android.graphics.RectF;
 import android.graphics.SurfaceTexture;
 import android.graphics.drawable.GradientDrawable;
+import android.media.ExifInterface;
 import android.media.MediaDataSource;
 import android.media.MediaPlayer;
 import android.net.Uri;
@@ -123,6 +124,8 @@ public final class RemoteMediaViewerActivity extends Activity {
     private boolean actionInProgress;
     private boolean retryDownloadAfterPermission;
     private int photoRotationDegrees;
+    private int previewPhotoWidth;
+    private int previewPhotoHeight;
     private boolean remoteVideoPrepared;
     private boolean remoteVideoUserPaused;
     private boolean remoteVideoInitialBuffering;
@@ -380,6 +383,8 @@ public final class RemoteMediaViewerActivity extends Activity {
         thumbnailView.setZoomEnabled(false);
         thumbnailView.setBitmap(bitmap);
         thumbnailView.setRotationDegrees(photoRotationDegrees);
+        previewPhotoWidth = bitmap.getWidth();
+        previewPhotoHeight = bitmap.getHeight();
         root.addView(thumbnailView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -398,6 +403,7 @@ public final class RemoteMediaViewerActivity extends Activity {
             root.removeView(thumbnailView);
             thumbnailView = null;
         }
+        autoRotateFullPhotoForPreview(bitmap);
         ZoomImageView imageView = new ZoomImageView(this);
         photoView = imageView;
         imageView.setBitmap(bitmap);
@@ -425,6 +431,7 @@ public final class RemoteMediaViewerActivity extends Activity {
 
     private Bitmap decodeRemotePhoto(CIFSContext context) throws Exception {
         SmbFile file = new SmbFile(url, context);
+        PhotoOrientation photoOrientation = readRemotePhotoOrientation(file);
 
         BitmapFactory.Options bounds = new BitmapFactory.Options();
         bounds.inJustDecodeBounds = true;
@@ -438,12 +445,13 @@ public final class RemoteMediaViewerActivity extends Activity {
             if (bitmap == null) {
                 throw new IOException("Image cannot be decoded");
             }
-            return bitmap;
+            return applyExifOrientation(bitmap, photoOrientation, bounds.outWidth, bounds.outHeight);
         }
     }
 
     private Bitmap decodeLocalPhoto() throws Exception {
         Uri uri = Uri.parse(uriString);
+        PhotoOrientation photoOrientation = readLocalPhotoOrientation(uri);
         BitmapFactory.Options bounds = new BitmapFactory.Options();
         bounds.inJustDecodeBounds = true;
         try (InputStream input = getContentResolver().openInputStream(uri)) {
@@ -462,8 +470,161 @@ public final class RemoteMediaViewerActivity extends Activity {
             if (bitmap == null) {
                 throw new IOException("Image cannot be decoded");
             }
+            return applyExifOrientation(bitmap, photoOrientation, bounds.outWidth, bounds.outHeight);
+        }
+    }
+
+    private PhotoOrientation readRemotePhotoOrientation(SmbFile file) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return PhotoOrientation.undefined();
+        }
+        try (InputStream input = new BufferedInputStream(new SmbFileInputStream(file))) {
+            ExifInterface exif = new ExifInterface(input);
+            return PhotoOrientation.from(exif);
+        } catch (Exception ignored) {
+            return PhotoOrientation.undefined();
+        }
+    }
+
+    private PhotoOrientation readLocalPhotoOrientation(Uri uri) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return PhotoOrientation.undefined();
+        }
+        try (InputStream input = getContentResolver().openInputStream(uri)) {
+            if (input == null) {
+                return PhotoOrientation.undefined();
+            }
+            ExifInterface exif = new ExifInterface(input);
+            return PhotoOrientation.from(exif);
+        } catch (Exception ignored) {
+            return PhotoOrientation.undefined();
+        }
+    }
+
+    private Bitmap applyExifOrientation(Bitmap bitmap, PhotoOrientation photoOrientation, int decodedBoundsWidth, int decodedBoundsHeight) {
+        int orientation = photoOrientation.orientation;
+        if (shouldKeepDecodedOrientation(bitmap, photoOrientation, decodedBoundsWidth, decodedBoundsHeight)) {
             return bitmap;
         }
+
+        Matrix matrix = new Matrix();
+        switch (orientation) {
+            case ExifInterface.ORIENTATION_FLIP_HORIZONTAL:
+                matrix.setScale(-1f, 1f);
+                break;
+            case ExifInterface.ORIENTATION_ROTATE_180:
+                matrix.setRotate(180f);
+                break;
+            case ExifInterface.ORIENTATION_FLIP_VERTICAL:
+                matrix.setScale(1f, -1f);
+                break;
+            case ExifInterface.ORIENTATION_TRANSPOSE:
+                matrix.setRotate(90f);
+                matrix.postScale(-1f, 1f);
+                break;
+            case ExifInterface.ORIENTATION_ROTATE_90:
+                matrix.setRotate(90f);
+                break;
+            case ExifInterface.ORIENTATION_TRANSVERSE:
+                matrix.setRotate(270f);
+                matrix.postScale(-1f, 1f);
+                break;
+            case ExifInterface.ORIENTATION_ROTATE_270:
+                matrix.setRotate(270f);
+                break;
+            case ExifInterface.ORIENTATION_NORMAL:
+            case ExifInterface.ORIENTATION_UNDEFINED:
+            default:
+                return bitmap;
+        }
+        try {
+            Bitmap oriented = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
+            if (oriented != bitmap) {
+                bitmap.recycle();
+            }
+            return oriented;
+        } catch (RuntimeException ignored) {
+            return bitmap;
+        }
+    }
+
+    private void autoRotateFullPhotoForPreview(Bitmap bitmap) {
+        if (bitmap == null || previewPhotoWidth <= 0 || previewPhotoHeight <= 0) {
+            return;
+        }
+        if (previewPhotoWidth == previewPhotoHeight || bitmap.getWidth() == bitmap.getHeight()) {
+            return;
+        }
+
+        boolean previewPortrait = isDisplayedPortrait(previewPhotoWidth, previewPhotoHeight, photoRotationDegrees);
+        boolean fullPortrait = isDisplayedPortrait(bitmap.getWidth(), bitmap.getHeight(), photoRotationDegrees);
+        if (previewPortrait == fullPortrait) {
+            return;
+        }
+
+        int rotatedDegrees = (photoRotationDegrees + 90) % 360;
+        if (isDisplayedPortrait(bitmap.getWidth(), bitmap.getHeight(), rotatedDegrees) != previewPortrait) {
+            return;
+        }
+
+        if (fittedPhotoArea(bitmap.getWidth(), bitmap.getHeight(), rotatedDegrees)
+                > fittedPhotoArea(bitmap.getWidth(), bitmap.getHeight(), photoRotationDegrees)) {
+            photoRotationDegrees = rotatedDegrees;
+        }
+    }
+
+    private boolean isDisplayedPortrait(int width, int height, int rotationDegrees) {
+        boolean quarterTurn = normalizedQuarterTurn(rotationDegrees);
+        int displayedWidth = quarterTurn ? height : width;
+        int displayedHeight = quarterTurn ? width : height;
+        return displayedHeight > displayedWidth;
+    }
+
+    private boolean normalizedQuarterTurn(int rotationDegrees) {
+        int normalized = rotationDegrees % 360;
+        if (normalized < 0) {
+            normalized += 360;
+        }
+        return normalized == 90 || normalized == 270;
+    }
+
+    private double fittedPhotoArea(int width, int height, int rotationDegrees) {
+        if (width <= 0 || height <= 0) {
+            return 0d;
+        }
+        boolean quarterTurn = normalizedQuarterTurn(rotationDegrees);
+        int displayedWidth = quarterTurn ? height : width;
+        int displayedHeight = quarterTurn ? width : height;
+        int viewportWidth = root != null && root.getWidth() > 0 ? root.getWidth() : getResources().getDisplayMetrics().widthPixels;
+        int viewportHeight = root != null && root.getHeight() > 0 ? root.getHeight() : getResources().getDisplayMetrics().heightPixels;
+        if (viewportWidth <= 0 || viewportHeight <= 0) {
+            return 0d;
+        }
+        double scale = Math.min(viewportWidth / (double) displayedWidth, viewportHeight / (double) displayedHeight);
+        return displayedWidth * scale * displayedHeight * scale;
+    }
+
+    private boolean shouldKeepDecodedOrientation(Bitmap bitmap, PhotoOrientation photoOrientation, int decodedBoundsWidth, int decodedBoundsHeight) {
+        if (!swapsDimensions(photoOrientation.orientation)) {
+            return false;
+        }
+
+        int rawWidth = decodedBoundsWidth;
+        int rawHeight = decodedBoundsHeight;
+        if (rawWidth <= 0 || rawHeight <= 0 || rawWidth == rawHeight) {
+            return false;
+        }
+
+        boolean rawLandscape = rawWidth > rawHeight;
+        boolean decodedLandscape = bitmap.getWidth() > bitmap.getHeight();
+        return rawLandscape != decodedLandscape;
+    }
+
+    private boolean swapsDimensions(int orientation) {
+        return orientation == ExifInterface.ORIENTATION_TRANSPOSE
+                || orientation == ExifInterface.ORIENTATION_ROTATE_90
+                || orientation == ExifInterface.ORIENTATION_TRANSVERSE
+                || orientation == ExifInterface.ORIENTATION_ROTATE_270;
     }
 
     private BitmapFactory.Options photoDecodeOptions(int width, int height) {
@@ -1615,6 +1776,23 @@ public final class RemoteMediaViewerActivity extends Activity {
 
     private int dp(int value) {
         return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private static final class PhotoOrientation {
+        final int orientation;
+
+        PhotoOrientation(int orientation) {
+            this.orientation = orientation;
+        }
+
+        static PhotoOrientation undefined() {
+            return new PhotoOrientation(ExifInterface.ORIENTATION_UNDEFINED);
+        }
+
+        static PhotoOrientation from(ExifInterface exif) {
+            int orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_UNDEFINED);
+            return new PhotoOrientation(orientation);
+        }
     }
 
     private static final class ViewerItem {
